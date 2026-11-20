@@ -21,6 +21,9 @@ Every pixel, 3D vertex, leaf silhouette, bark furrow, mossy boulder, lake causti
 Open `index.html` directly in any modern WebGL2-capable browser (works 100% offline).
 
 ### Controls
+- **Look Around**: Left-click & drag on the canvas.
+- **Move / Fly**: `W` `A` `S` `D` or Arrow keys to move horizontally, `Q` / `E` (or `C` / `Space`) to descend / ascend, hold `Shift` to fly faster, mouse wheel to dolly forward/backward.
+- **Reset Camera**: Press `R` or click **重置视角 (R)**.
 - **Seed**: Enter any seed and click **生成** (or press `Enter`), or click **随机种子** for a new composition.
 - **Pause / Play**: Toggle subtle real-time micro-motion.
 - **Export PNG**: Save an exact `1920×1080` PNG snapshot.

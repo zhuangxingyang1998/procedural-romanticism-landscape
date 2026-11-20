@@ -32,6 +32,10 @@
     display: block;
     box-shadow: 0 24px 80px rgba(0, 0, 0, 0.85);
     background: #0b0e14;
+    cursor: grab;
+  }
+  canvas#scene:active {
+    cursor: grabbing;
   }
   #hud {
     position: fixed;
@@ -140,8 +144,10 @@
   <button id="applySeedBtn">生成</button>
   <button id="randSeedBtn">随机种子</button>
   <button id="pauseBtn">暂停微动</button>
+  <button id="resetCamBtn">重置视角 (R)</button>
   <button id="saveBtn">导出 PNG</button>
   <span id="status">初始化…</span>
+  <span style="color:#9e998e;padding-left:8px;border-left:1px solid rgba(255,255,255,0.12)">拖拽旋转 · WASD移动 · Q/E升降 · 滚轮前后</span>
 </div>
 <button id="hudToggle" title="隐藏/显示面板 (H)">HUD (H)</button>
 <div id="errorBox"></div>
@@ -1412,9 +1418,9 @@
     vec3 col = skyCol;
     bool hitMountain = false;
 
-    // Raymarch distant 3D mountains in the horizon band
-    if (rd.y > -0.02 && rd.y < 0.38) {
-      float t = 155.0 / max(0.25, rd.z);
+    // Raymarch distant 3D mountains in the horizon band (only forward hemisphere z > 155)
+    if (rd.y > -0.02 && rd.y < 0.38 && rd.z > 0.04) {
+      float t = max(2.0, (155.0 - uCamPos.z) / rd.z);
       float tMax = 4400.0;
       float hitT = -1.0;
 
@@ -1888,9 +1894,14 @@
 
   uniform sampler2D uSceneTex;
   uniform vec2 uSunScreenUV;
+  uniform float uSunVis;
   uniform float uTime;
 
   void main() {
+    if (uSunVis <= 0.001) {
+      fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+      return;
+    }
     vec2 delta = (vUV - uSunScreenUV);
     float distToSun = length(delta);
     const int SAMPLES = 56;
@@ -1915,7 +1926,7 @@
     float shimmer = 0.93 + 0.07 * sin(uTime * 0.65 + vUV.x * 9.0 + vUV.y * 5.0);
     float radialFade = smoothstep(1.15, 0.04, distToSun);
     vec3 rayTint = vec3(1.28, 0.84, 0.40);
-    fragColor = vec4(accum * rayTint * radialFade * shimmer * 0.34, 1.0);
+    fragColor = vec4(accum * rayTint * radialFade * shimmer * 0.34 * uSunVis, 1.0);
   }`;
 
   // Pass F: Sunlit Pollen, Glowing Forest Spores & Lake Mist Particle System
@@ -2086,47 +2097,71 @@
     return;
   }
 
-  let fboBackdrop, fboBackdropRefl, fboMain, fboRefl, fboWater, fboGodRays, fboBloomA, fboBloomB;
+  let fboBackdrop, fboBackdropRefl, fboBackdropFast, fboBackdropReflFast, fboMain, fboRefl, fboWater, fboGodRays, fboBloomA, fboBloomB;
   try {
-    fboBackdrop     = createFBO(WIDTH, HEIGHT, { hdr: true });
-    fboBackdropRefl = createFBO(1280, 720, { hdr: true });
-    fboMain         = createFBO(WIDTH, HEIGHT, { hdr: true, withDepth: true });
-    fboRefl         = createFBO(1280, 720, { hdr: true, withDepth: true });
-    fboWater        = createFBO(WIDTH, HEIGHT, { hdr: true });
-    fboGodRays      = createFBO(960, 540, { hdr: true });
-    fboBloomA       = createFBO(480, 270, { hdr: true });
-    fboBloomB       = createFBO(480, 270, { hdr: true });
+    fboBackdrop         = createFBO(WIDTH, HEIGHT, { hdr: true });
+    fboBackdropRefl     = createFBO(1280, 720, { hdr: true });
+    fboBackdropFast     = createFBO(960, 540, { hdr: true });
+    fboBackdropReflFast = createFBO(640, 360, { hdr: true });
+    fboMain             = createFBO(WIDTH, HEIGHT, { hdr: true, withDepth: true });
+    fboRefl             = createFBO(1280, 720, { hdr: true, withDepth: true });
+    fboWater            = createFBO(WIDTH, HEIGHT, { hdr: true });
+    fboGodRays          = createFBO(960, 540, { hdr: true });
+    fboBloomA           = createFBO(480, 270, { hdr: true });
+    fboBloomB           = createFBO(480, 270, { hdr: true });
   } catch (e) {
     showError(e.message);
     return;
   }
 
-  // Camera & Lighting setup (Romanticism low-sunrise composition)
-  const camPos = [0.0, 2.55, 0.0];
-  const camTarget = [0.0, 3.05, 50.0];
-  const viewMat = mat4LookAt(camPos, camTarget, [0, 1, 0]);
-  const projMat = mat4Perspective(46 * Math.PI / 180, WIDTH / HEIGHT, 0.4, 5000.0);
-  const viewProjMat = mat4Mul(projMat, viewMat);
-  const invViewProjMat = mat4Invert(viewProjMat);
+  // Camera & Lighting setup (Romanticism low-sunrise composition + Free 3D Explore)
+  const HERO_POS = [0.0, 2.55, 0.0];
+  const HERO_YAW = 0.0;
+  const HERO_PITCH = 0.01;
 
-  // Camera basis vectors for instanced leaf billboards
-  const camForward = norm3(sub3(camTarget, camPos));
-  const camRight = norm3(cross3(camForward, [0, 1, 0]));
-  const camUp = norm3(cross3(camRight, camForward));
+  let camPos = HERO_POS.slice();
+  let camYaw = HERO_YAW;
+  let camPitch = HERO_PITCH;
+  let targetCamPos = HERO_POS.slice();
+  let targetYaw = HERO_YAW;
+  let targetPitch = HERO_PITCH;
+
+  const projMat = mat4Perspective(46 * Math.PI / 180, WIDTH / HEIGHT, 0.4, 5000.0);
+  let viewMat, viewProjMat, invViewProjMat;
+  let camForward, camRight, camUp;
+  let sunScreenUV = [0.5, 0.5];
+  let sunVis = 1.0;
 
   // Sun direction: shining through central-left alpine pass at sunrise
   const sunDir = norm3([-0.18, 0.145, 0.972]);
 
-  // Project sun direction onto screen UV for radial god-rays
-  function computeSunScreenUV() {
+  function updateCameraMatrices() {
+    const cp = Math.cos(camPitch), sp = Math.sin(camPitch);
+    const sy = Math.sin(camYaw), cy = Math.cos(camYaw);
+    camForward = norm3([sy * cp, sp, cy * cp]);
+    camRight = norm3(cross3(camForward, [0, 1, 0]));
+    camUp = norm3(cross3(camRight, camForward));
+
+    const target = add3(camPos, mul3(camForward, 50.0));
+    viewMat = mat4LookAt(camPos, target, [0, 1, 0]);
+    viewProjMat = mat4Mul(projMat, viewMat);
+    invViewProjMat = mat4Invert(viewProjMat);
+
     const p = [camPos[0] + sunDir[0] * 1000, camPos[1] + sunDir[1] * 1000, camPos[2] + sunDir[2] * 1000];
     const m = viewProjMat;
     const cx = m[0]*p[0] + m[4]*p[1] + m[8]*p[2] + m[12];
-    const cy = m[1]*p[0] + m[5]*p[1] + m[9]*p[2] + m[13];
+    const cyP = m[1]*p[0] + m[5]*p[1] + m[9]*p[2] + m[13];
     const cw = m[3]*p[0] + m[7]*p[1] + m[11]*p[2] + m[15];
-    return [(cx / cw) * 0.5 + 0.5, (cy / cw) * 0.5 + 0.5];
+    const fwdDot = dot3(camForward, sunDir);
+    sunVis = clamp(fwdDot * 2.5, 0.0, 1.0);
+    if (cw > 0.01) {
+      sunScreenUV = [(cx / cw) * 0.5 + 0.5, (cyP / cw) * 0.5 + 0.5];
+    } else {
+      sunScreenUV = [0.5, 0.5];
+      sunVis = 0.0;
+    }
   }
-  const sunScreenUV = computeSunScreenUV();
+  updateCameraMatrices();
 
   // =========================================================================
   // 8. Seed State & GPU Buffer Upload
@@ -2254,6 +2289,7 @@
       leafCount: forest.leafCount,
       particleVAO,
       particleCount: particles.count,
+      seedOffset,
       buffers
     };
 
@@ -2327,14 +2363,17 @@
     gl.bindVertexArray(null);
   }
 
-  function renderFrame(timeSec) {
+  function renderFrame(timeSec, useFastBackdrop = false) {
     if (!sceneGPU) return;
 
+    const bgMain = useFastBackdrop ? fboBackdropFast.colorTex : fboBackdrop.colorTex;
+    const bgRefl = useFastBackdrop ? fboBackdropReflFast.colorTex : fboBackdropRefl.colorTex;
+
     // Pass 1A: Mirrored Planar Reflection Scene
-    drawScenePass(fboRefl, fboBackdropRefl.colorTex, 1.0, timeSec);
+    drawScenePass(fboRefl, bgRefl, 1.0, timeSec);
 
     // Pass 1B: Main Scene + Crystal-Clear Submerged Lakebed
-    drawScenePass(fboMain, fboBackdrop.colorTex, 0.0, timeSec);
+    drawScenePass(fboMain, bgMain, 0.0, timeSec);
 
     // Pass 2: Water Surface Compositing (Fresnel + Refracted Bed + Rippled Reflection + Sun Path)
     gl.bindFramebuffer(gl.FRAMEBUFFER, fboWater.fbo);
@@ -2378,6 +2417,7 @@
     gl.bindTexture(gl.TEXTURE_2D, fboMain.colorTex);
     gl.uniform1i(gl.getUniformLocation(progGodRays, 'uSceneTex'), 0);
     gl.uniform2fv(gl.getUniformLocation(progGodRays, 'uSunScreenUV'), sunScreenUV);
+    gl.uniform1f(gl.getUniformLocation(progGodRays, 'uSunVis'), sunVis);
     gl.uniform1f(gl.getUniformLocation(progGodRays, 'uTime'), timeSec);
     gl.bindVertexArray(quadVAO);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -2424,40 +2464,158 @@
   }
 
   // =========================================================================
-  // 10. Animation Loop & Controls
+  // 10. Free 3D Camera Controls & Animation Loop
   // =========================================================================
   let paused = false;
   let simTime = 0.0;
   let lastNow = performance.now();
 
+  const keysDown = new Set();
+  let isDragging = false;
+  let lastMouseX = 0, lastMouseY = 0;
+  let backdropNeedsFullRes = false;
+  let lastCamMoveAt = 0;
+
+  function clampTargetCamera() {
+    targetCamPos[0] = clamp(targetCamPos[0], -85.0, 85.0);
+    targetCamPos[1] = clamp(targetCamPos[1], 0.45, 58.0);
+    targetCamPos[2] = clamp(targetCamPos[2], -35.0, 132.0);
+    targetPitch = clamp(targetPitch, -1.25, 1.25);
+  }
+
+  function resetCamera() {
+    targetCamPos = HERO_POS.slice();
+    targetYaw = HERO_YAW;
+    targetPitch = HERO_PITCH;
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    isDragging = true;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const dx = e.clientX - lastMouseX;
+    const dy = e.clientY - lastMouseY;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+    // Dragging left turns view left (+yaw), dragging up tilts view up (+pitch)
+    targetYaw -= dx * 0.0032;
+    targetPitch -= dy * 0.0032;
+    clampTargetCamera();
+  });
+
+  window.addEventListener('mouseup', () => { isDragging = false; });
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const step = -Math.sign(e.deltaY) * 2.8;
+    targetCamPos[0] += camForward[0] * step;
+    targetCamPos[1] += camForward[1] * step;
+    targetCamPos[2] += camForward[2] * step;
+    clampTargetCamera();
+  }, { passive: false });
+
+  window.addEventListener('keydown', (e) => {
+    if (document.activeElement === seedInput) return;
+    const k = e.key.toLowerCase();
+    keysDown.add(k);
+    if (k === 'h') hud.classList.toggle('hidden');
+    if (k === 'r') resetCamera();
+  });
+
+  window.addEventListener('keyup', (e) => {
+    keysDown.delete(e.key.toLowerCase());
+  });
+
   function tick(now) {
     const dt = Math.min(0.05, (now - lastNow) * 0.001);
     lastNow = now;
+
+    // Keyboard flight movement
+    const speed = (keysDown.has('shift') ? 26.0 : 11.5) * dt;
+    const flatFwd = norm3([Math.sin(targetYaw), 0, Math.cos(targetYaw)]);
+    const flatRight = norm3(cross3(flatFwd, [0, 1, 0]));
+    if (keysDown.has('w') || keysDown.has('arrowup')) {
+      targetCamPos[0] += flatFwd[0] * speed;
+      targetCamPos[2] += flatFwd[2] * speed;
+    }
+    if (keysDown.has('s') || keysDown.has('arrowdown')) {
+      targetCamPos[0] -= flatFwd[0] * speed;
+      targetCamPos[2] -= flatFwd[2] * speed;
+    }
+    if (keysDown.has('d') || keysDown.has('arrowright')) {
+      targetCamPos[0] += flatRight[0] * speed;
+      targetCamPos[2] += flatRight[2] * speed;
+    }
+    if (keysDown.has('a') || keysDown.has('arrowleft')) {
+      targetCamPos[0] -= flatRight[0] * speed;
+      targetCamPos[2] -= flatRight[2] * speed;
+    }
+    if (keysDown.has('e') || keysDown.has(' ')) targetCamPos[1] += speed * 0.85;
+    if (keysDown.has('q') || keysDown.has('c')) targetCamPos[1] -= speed * 0.85;
+    clampTargetCamera();
+
+    // Smooth camera damping
+    const damp = 1.0 - Math.exp(-12.0 * dt);
+    const prevX = camPos[0], prevY = camPos[1], prevZ = camPos[2], prevYaw = camYaw, prevPitch = camPitch;
+    camPos[0] = mix(camPos[0], targetCamPos[0], damp);
+    camPos[1] = mix(camPos[1], targetCamPos[1], damp);
+    camPos[2] = mix(camPos[2], targetCamPos[2], damp);
+    camYaw = mix(camYaw, targetYaw, damp);
+    camPitch = mix(camPitch, targetPitch, damp);
+
+    const moved =
+      Math.abs(camPos[0] - prevX) + Math.abs(camPos[1] - prevY) + Math.abs(camPos[2] - prevZ) +
+      Math.abs(camYaw - prevYaw) * 10.0 + Math.abs(camPitch - prevPitch) * 10.0 > 0.0005;
+
+    if (moved && sceneGPU) {
+      updateCameraMatrices();
+      renderBackdropFBO(fboBackdropFast, 0.0, sceneGPU.seedOffset);
+      renderBackdropFBO(fboBackdropReflFast, 1.0, sceneGPU.seedOffset);
+      backdropNeedsFullRes = true;
+      lastCamMoveAt = now;
+    } else if (backdropNeedsFullRes && (now - lastCamMoveAt > 140) && sceneGPU) {
+      updateCameraMatrices();
+      renderBackdropFBO(fboBackdrop, 0.0, sceneGPU.seedOffset);
+      renderBackdropFBO(fboBackdropRefl, 1.0, sceneGPU.seedOffset);
+      backdropNeedsFullRes = false;
+      if (paused) renderFrame(simTime, false);
+    }
+
     if (!paused) {
       simTime += dt;
-      renderFrame(simTime);
+      renderFrame(simTime, backdropNeedsFullRes);
+    } else if (moved) {
+      renderFrame(simTime, true);
     }
+
     requestAnimationFrame(tick);
   }
 
   document.getElementById('applySeedBtn').addEventListener('click', () => {
     rebuildWorld(seedInput.value);
-    renderFrame(simTime);
+    renderFrame(simTime, false);
   });
 
   document.getElementById('randSeedBtn').addEventListener('click', () => {
     const s = Math.floor(1000 + Math.random() * 89999);
     seedInput.value = String(s);
     rebuildWorld(seedInput.value);
-    renderFrame(simTime);
+    renderFrame(simTime, false);
   });
 
   seedInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       rebuildWorld(seedInput.value);
-      renderFrame(simTime);
+      renderFrame(simTime, false);
     }
   });
+
+  document.getElementById('resetCamBtn').addEventListener('click', resetCamera);
 
   const pauseBtn = document.getElementById('pauseBtn');
   pauseBtn.addEventListener('click', () => {
@@ -2466,7 +2624,12 @@
   });
 
   document.getElementById('saveBtn').addEventListener('click', () => {
-    renderFrame(simTime);
+    if (backdropNeedsFullRes && sceneGPU) {
+      renderBackdropFBO(fboBackdrop, 0.0, sceneGPU.seedOffset);
+      renderBackdropFBO(fboBackdropRefl, 1.0, sceneGPU.seedOffset);
+      backdropNeedsFullRes = false;
+    }
+    renderFrame(simTime, false);
     canvas.toBlob((blob) => {
       if (!blob) return;
       const url = URL.createObjectURL(blob);
@@ -2482,15 +2645,9 @@
     hud.classList.toggle('hidden');
   });
 
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'h' || e.key === 'H') {
-      if (document.activeElement !== seedInput) hud.classList.toggle('hidden');
-    }
-  });
-
   // Initialize hero scene
   rebuildWorld(seedInput.value);
-  renderFrame(0.0);
+  renderFrame(0.0, false);
   requestAnimationFrame(tick);
 })();
 </script>
