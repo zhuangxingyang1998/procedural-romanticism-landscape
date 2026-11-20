@@ -4,9 +4,10 @@ A self-contained, zero-dependency procedural 19th-century Romanticism alpine sun
 
 Every pixel, 3D vertex, leaf silhouette, bark furrow, mossy boulder, lake caustic, and volumetric sunbeam is synthesized purely from mathematics and deterministic seeded noise — no external libraries, no SVG imports, and no image assets.
 
-## Live Demo
+## Live Demo & Docs
 
 - **GitHub Pages**: https://zhuangxingyang1998.github.io/procedural-romanticism-landscape/
+- **整体实现方案与技术架构（中文详解）**: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## Features
 
