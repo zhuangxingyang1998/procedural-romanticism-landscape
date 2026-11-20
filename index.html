@@ -1,0 +1,2498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Alpine Sunrise — Procedural Romanticism Landscape (1920×1080)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    background: #07090d;
+    color: #e8e2d5;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+    user-select: none;
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 50% 45%, #12161f 0%, #05070a 100%);
+  }
+  canvas#scene {
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    max-height: 100vh;
+    object-fit: contain;
+    display: block;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.85);
+    background: #0b0e14;
+  }
+  #hud {
+    position: fixed;
+    left: 20px;
+    bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    border-radius: 10px;
+    background: rgba(12, 15, 22, 0.72);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 224, 170, 0.16);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    z-index: 10;
+    transition: opacity 0.35s ease, transform 0.35s ease;
+  }
+  #hud.hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(8px);
+  }
+  .badge {
+    color: #f3c87b;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    padding-right: 8px;
+    border-right: 1px solid rgba(255,255,255,0.12);
+  }
+  label {
+    color: #b7b2a6;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  input#seedInput {
+    width: 78px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 224, 170, 0.22);
+    background: rgba(255, 255, 255, 0.06);
+    color: #f7f1e3;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    outline: none;
+  }
+  input#seedInput:focus {
+    border-color: #f3c87b;
+  }
+  button {
+    padding: 5px 11px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 224, 170, 0.24);
+    background: rgba(255, 224, 170, 0.1);
+    color: #f6ead2;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  button:hover {
+    background: rgba(255, 224, 170, 0.22);
+    border-color: rgba(255, 224, 170, 0.5);
+  }
+  #hudToggle {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 11;
+    opacity: 0.45;
+    font-size: 11px;
+    padding: 5px 9px;
+    background: rgba(12, 15, 22, 0.65);
+  }
+  #hudToggle:hover { opacity: 1; }
+  #status {
+    color: #9dc7b8;
+    font-variant-numeric: tabular-nums;
+    min-width: 56px;
+  }
+  #errorBox {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    background: rgba(8, 10, 14, 0.94);
+    color: #f6b299;
+    font-family: monospace;
+    white-space: pre-wrap;
+    z-index: 100;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="scene" width="1920" height="1080"></canvas>
+</div>
+
+<div id="hud">
+  <span class="badge">1920×1080</span>
+  <label>Seed
+    <input id="seedInput" type="text" value="1874" />
+  </label>
+  <button id="applySeedBtn">生成</button>
+  <button id="randSeedBtn">随机种子</button>
+  <button id="pauseBtn">暂停微动</button>
+  <button id="saveBtn">导出 PNG</button>
+  <span id="status">初始化…</span>
+</div>
+<button id="hudToggle" title="隐藏/显示面板 (H)">HUD (H)</button>
+<div id="errorBox"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  const WIDTH = 1920;
+  const HEIGHT = 1080;
+
+  const canvas = document.getElementById('scene');
+  const statusEl = document.getElementById('status');
+  const errorBox = document.getElementById('errorBox');
+  const seedInput = document.getElementById('seedInput');
+  const hud = document.getElementById('hud');
+
+  function showError(msg) {
+    errorBox.style.display = 'flex';
+    errorBox.textContent = msg;
+    console.error(msg);
+  }
+
+  const gl = canvas.getContext('webgl2', {
+    alpha: false,
+    antialias: false,
+    depth: true,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: false
+  });
+
+  if (!gl) {
+    showError('需要支持 WebGL2 的现代浏览器才能运行此程序。');
+    return;
+  }
+
+  const extFloat = gl.getExtension('EXT_color_buffer_float');
+  const extHalfFloat = gl.getExtension('EXT_color_buffer_half_float');
+  const USE_HDR_FBO = !!(extFloat || extHalfFloat);
+
+  // =========================================================================
+  // 1. Seedable PRNG & Procedural Math / Noise Toolkit
+  // =========================================================================
+  function hashString(str) {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  class PRNG {
+    constructor(seedVal) {
+      this.state = (typeof seedVal === 'number' ? seedVal : hashString(String(seedVal))) >>> 0;
+      if (this.state === 0) this.state = 0x6d2b79f5;
+    }
+    next() {
+      let t = (this.state += 0x6d2b79f5);
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+    range(a, b) { return a + (b - a) * this.next(); }
+    int(a, b) { return Math.floor(this.range(a, b + 1)); }
+    signed() { return this.next() * 2 - 1; }
+  }
+
+  class Noise2D {
+    constructor(seed) {
+      const rng = new PRNG(seed);
+      this.p = new Uint8Array(512);
+      const base = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) base[i] = i;
+      for (let i = 255; i > 0; i--) {
+        const j = Math.floor(rng.next() * (i + 1));
+        const tmp = base[i]; base[i] = base[j]; base[j] = tmp;
+      }
+      for (let i = 0; i < 512; i++) this.p[i] = base[i & 255];
+    }
+    fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+    lerp(a, b, t) { return a + t * (b - a); }
+    grad(hash, x, y) {
+      const h = hash & 7;
+      const u = h < 4 ? x : y;
+      const v = h < 4 ? y : x;
+      return ((h & 1) ? -u : u) + ((h & 2) ? -2.0 * v : 2.0 * v);
+    }
+    noise(x, y) {
+      const X = Math.floor(x) & 255;
+      const Y = Math.floor(y) & 255;
+      const xf = x - Math.floor(x);
+      const yf = y - Math.floor(y);
+      const u = this.fade(xf);
+      const v = this.fade(yf);
+      const p = this.p;
+      const aa = p[p[X] + Y], ab = p[p[X] + Y + 1];
+      const ba = p[p[X + 1] + Y], bb = p[p[X + 1] + Y + 1];
+      const x1 = this.lerp(this.grad(aa, xf, yf), this.grad(ba, xf - 1, yf), u);
+      const x2 = this.lerp(this.grad(ab, xf, yf - 1), this.grad(bb, xf - 1, yf - 1), u);
+      return this.lerp(x1, x2, v) * 0.45;
+    }
+    fbm(x, y, octaves = 5, lacunarity = 2.04, gain = 0.5) {
+      let sum = 0, amp = 0.5, freq = 1.0, norm = 0;
+      for (let i = 0; i < octaves; i++) {
+        sum += amp * this.noise(x * freq, y * freq);
+        norm += amp;
+        freq *= lacunarity;
+        amp *= gain;
+      }
+      return sum / norm;
+    }
+    ridged(x, y, octaves = 5) {
+      let sum = 0, amp = 0.5, freq = 1.0, weight = 1.0, norm = 0;
+      for (let i = 0; i < octaves; i++) {
+        let n = 1.0 - Math.abs(this.noise(x * freq, y * freq) * 1.45);
+        n = Math.max(0.0, n);
+        n = n * n * weight;
+        weight = Math.min(1.0, Math.max(0.0, n * 1.8));
+        sum += n * amp;
+        norm += amp;
+        freq *= 2.12;
+        amp *= 0.5;
+      }
+      return sum / norm;
+    }
+  }
+
+  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+  function smoothstep(e0, e1, x) {
+    const t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+  }
+  function mix(a, b, t) { return a + (b - a) * t; }
+
+  // Float32 -> Float16 converter for hardware-filterable RGBA16F textures
+  const f32View = new Float32Array(1);
+  const u32View = new Uint32Array(f32View.buffer);
+  function floatToHalf(val) {
+    f32View[0] = val;
+    const x = u32View[0];
+    const sign = (x >>> 16) & 0x8000;
+    let mant = x & 0x007fffff;
+    let exp = ((x >>> 23) & 0xff) - 127 + 15;
+    if (exp <= 0) {
+      if (exp < -10) return sign;
+      mant = (mant | 0x00800000) >>> (1 - exp);
+      return sign | (mant >>> 13);
+    } else if (exp === 0xff - 127 + 15) {
+      return sign | 0x7c00 | (mant ? 1 : 0);
+    } else if (exp > 30) {
+      return sign | 0x7c00;
+    }
+    return sign | (exp << 10) | (mant >>> 13);
+  }
+
+  // Minimal 3D vector & matrix math
+  function v3(x, y, z) { return [x, y, z]; }
+  function add3(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+  function sub3(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+  function mul3(a, s) { return [a[0] * s, a[1] * s, a[2] * s]; }
+  function dot3(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+  function cross3(a, b) {
+    return [
+      a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2],
+      a[0] * b[1] - a[1] * b[0]
+    ];
+  }
+  function len3(a) { return Math.hypot(a[0], a[1], a[2]); }
+  function norm3(a) {
+    const l = len3(a) || 1.0;
+    return [a[0] / l, a[1] / l, a[2] / l];
+  }
+
+  function mat4Perspective(fovyRad, aspect, near, far) {
+    const f = 1.0 / Math.tan(fovyRad * 0.5);
+    const nf = 1.0 / (near - far);
+    return new Float32Array([
+      f / aspect, 0, 0, 0,
+      0, f, 0, 0,
+      0, 0, (far + near) * nf, -1,
+      0, 0, 2 * far * near * nf, 0
+    ]);
+  }
+
+  function mat4LookAt(eye, center, up) {
+    const f = norm3(sub3(center, eye));
+    const s = norm3(cross3(f, up));
+    const u = cross3(s, f);
+    return new Float32Array([
+      s[0], u[0], -f[0], 0,
+      s[1], u[1], -f[1], 0,
+      s[2], u[2], -f[2], 0,
+      -dot3(s, eye), -dot3(u, eye), dot3(f, eye), 1
+    ]);
+  }
+
+  function mat4Mul(a, b) {
+    const out = new Float32Array(16);
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        out[c * 4 + r] =
+          a[0 * 4 + r] * b[c * 4 + 0] +
+          a[1 * 4 + r] * b[c * 4 + 1] +
+          a[2 * 4 + r] * b[c * 4 + 2] +
+          a[3 * 4 + r] * b[c * 4 + 3];
+      }
+    }
+    return out;
+  }
+
+  function mat4Invert(m) {
+    const inv = new Float32Array(16);
+    inv[0] = m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4] = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8] = m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1] = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5] = m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9] = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] = m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2] = m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+    inv[6] = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+    inv[10] = m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+    inv[3] = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+    inv[7] = m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11] - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+    inv[15] = m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10] + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+    let det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (!det) return null;
+    det = 1.0 / det;
+    for (let i = 0; i < 16; i++) inv[i] *= det;
+    return inv;
+  }
+
+  // =========================================================================
+  // 2. WebGL2 Helper Utilities
+  // =========================================================================
+  function compileShader(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(sh);
+      const numbered = src.split('\n').map((l, i) => `${i + 1}: ${l}`).join('\n');
+      throw new Error(`Shader compile failed:\n${log}\n\n${numbered}`);
+    }
+    return sh;
+  }
+
+  function createProgram(vsSrc, fsSrc) {
+    const p = gl.createProgram();
+    const vs = compileShader(gl.VERTEX_SHADER, vsSrc);
+    const fs = compileShader(gl.FRAGMENT_SHADER, fsSrc);
+    gl.attachShader(p, vs);
+    gl.attachShader(p, fs);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      throw new Error('Program link failed:\n' + gl.getProgramInfoLog(p));
+    }
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    return p;
+  }
+
+  function createTexture2D(w, h, internalFormat, format, type, data, filter = gl.LINEAR, wrap = gl.CLAMP_TO_EDGE) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, type, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    return tex;
+  }
+
+  function createFBO(w, h, { hdr = true, withDepth = false } = {}) {
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+
+    const useHDR = hdr && USE_HDR_FBO;
+    const internalFmt = useHDR ? gl.RGBA16F : gl.RGBA8;
+    const type = useHDR ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+    const colorTex = createTexture2D(w, h, internalFmt, gl.RGBA, type, null, gl.LINEAR, gl.CLAMP_TO_EDGE);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, colorTex, 0);
+
+    let depthTex = null;
+    if (withDepth) {
+      depthTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, depthTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depthTex, 0);
+    }
+
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error(`FBO incomplete (${w}x${h}): 0x${status.toString(16)}`);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { fbo, colorTex, depthTex, w, h };
+  }
+
+  // Fullscreen quad VAO
+  const quadVAO = gl.createVertexArray();
+  gl.bindVertexArray(quadVAO);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  // =========================================================================
+  // 3. Procedural Botanical & Material Texture Synthesis (Pure Math)
+  // =========================================================================
+  function buildProceduralTextures(seed) {
+    const noise = new Noise2D(seed ^ 0x9e3779b9);
+
+    // A) Leaf & Pine Needle Atlas (512x256: Left half = Broadleaf, Right half = Pine Needle Spray)
+    const lw = 512, lh = 256;
+    const leafBytes = new Uint8Array(lw * lh * 4);
+    for (let y = 0; y < lh; y++) {
+      for (let x = 0; x < lw; x++) {
+        const idx = (y * lw + x) * 4;
+        const isPine = x >= 256;
+        if (!isPine) {
+          // Broadleaf mathematical SDF + veins + serrated edge
+          const u = (x / 256) * 2.0 - 1.0;       // -1..1
+          const v = (y / lh) * 2.0 - 1.0;        // -1 (stem) .. 1 (tip)
+          const t = clamp((v + 0.85) / 1.72, 0.0, 1.0);
+          const halfW = Math.sin(Math.pow(t, 0.72) * Math.PI) * 0.68 * (1.0 - 0.16 * t);
+          const serration = 0.032 * Math.sin(t * 42.0) * smoothstep(0.1, 0.4, t) * smoothstep(1.0, 0.78, t);
+          const curveX = u - 0.06 * Math.sin(v * 2.2);
+          const dist = Math.abs(curveX) - (halfW + serration);
+          const stemDist = Math.max(Math.abs(curveX) - 0.035, Math.abs(v + 0.86) - 0.16);
+          const shape = Math.min(dist, stemDist);
+          const alpha = smoothstep(0.035, -0.02, shape) * (v > -0.96 && v < 0.92 ? 1.0 : 0.0);
+
+          const midrib = Math.exp(-Math.abs(curveX) * 44.0) * (1.0 - t * 0.4);
+          const latCoord = (v - Math.abs(curveX) * 0.85) * 18.0;
+          const latVein = Math.pow(Math.max(0.0, Math.cos(latCoord * Math.PI)), 16.0) * smoothstep(0.04, 0.25, Math.abs(curveX)) * (1.0 - t * 0.25);
+          const vein = clamp(midrib * 0.9 + latVein * 0.55, 0.0, 1.0);
+          const micro = noise.fbm(u * 12.0, v * 12.0, 3) * 0.5 + 0.5;
+          const sss = clamp(0.45 + 0.45 * (1.0 - vein) + 0.2 * t, 0.0, 1.0);
+
+          leafBytes[idx + 0] = Math.round(clamp(0.45 + 0.35 * micro + 0.18 * vein, 0, 1) * 255);
+          leafBytes[idx + 1] = Math.round(clamp(0.65 + 0.25 * micro - 0.08 * vein, 0, 1) * 255);
+          leafBytes[idx + 2] = Math.round(clamp(sss, 0, 1) * 255);
+          leafBytes[idx + 3] = Math.round(alpha * 255);
+        } else {
+          // Organic Pine Needle Bough Cluster (needles radiating along a curved twig + sub-twigs, zero radial fan spoke!)
+          const u = ((x - 256) / 256) * 2.0 - 1.0;
+          const v = (y / lh) * 2.0 - 1.0;
+          let maxNeedle = 0.0;
+          let needleShade = 0.0;
+          for (let k = 0; k < 36; k++) {
+            const frac = k / 35;
+            const twigSide = (k % 2 === 0 ? 1 : -1);
+            const twigY = mix(-0.62, 0.56, frac);
+            const twigX = Math.sin(frac * 3.8) * 0.14 + (k % 5 === 0 ? twigSide * 0.24 : 0.0);
+            const ang = twigSide * (0.45 + 0.55 * (1.0 - frac)) + Math.sin(k * 9.7) * 0.35;
+            const dx = u - twigX, dy = v - twigY;
+            const ca = Math.cos(ang), sa = Math.sin(ang);
+            const lx = dx * ca - dy * sa;
+            const ly = dx * sa + dy * ca;
+            const len = 0.52 + Math.sin(k * 5.3) * 0.14 - frac * 0.16;
+            const w = 0.026 * (1.0 - smoothstep(0.45, 1.0, ly / len));
+            if (ly > 0.0 && ly < len) {
+              const d = Math.abs(lx) - w;
+              const cov = smoothstep(0.02, -0.008, d);
+              if (cov > maxNeedle) {
+                maxNeedle = cov;
+                needleShade = 0.42 + 0.58 * (ly / len) + (k % 3) * 0.07;
+              }
+            }
+          }
+          leafBytes[idx + 0] = Math.round(clamp(needleShade * 0.85, 0, 1) * 255);
+          leafBytes[idx + 1] = Math.round(clamp(needleShade, 0, 1) * 255);
+          leafBytes[idx + 2] = Math.round(clamp(0.4 + 0.5 * needleShade, 0, 1) * 255);
+          leafBytes[idx + 3] = Math.round(maxNeedle * 255);
+        }
+      }
+    }
+    const leafTex = createTexture2D(lw, lh, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, leafBytes, gl.LINEAR, gl.CLAMP_TO_EDGE);
+
+    // B) High-res Seamless Material Noise Atlas (256x256: R=fBm, G=Ridged/Bark, B=Cellular Pebbles, A=Moss Micro-tufts)
+    const nw = 256, nh = 256;
+    const matBytes = new Uint8Array(nw * nh * 4);
+    for (let y = 0; y < nh; y++) {
+      for (let x = 0; x < nw; x++) {
+        const u = x / nw, v = y / nh;
+        // Seamless via periodic angle mapping on torus in 2D slices
+        const ax = Math.cos(u * Math.PI * 2), ay = Math.sin(u * Math.PI * 2);
+        const bx = Math.cos(v * Math.PI * 2), by = Math.sin(v * Math.PI * 2);
+        const fbmV = clamp(noise.fbm(ax * 2.4 + bx * 0.7, ay * 2.4 + by * 0.7, 5) * 0.55 + 0.5, 0, 1);
+        const barkV = clamp(noise.ridged(u * 14.0 + fbmV * 0.3, v * 3.2, 4), 0, 1);
+        // Smooth pebble cellular pattern
+        let minD = 999.0;
+        const gx = u * 9.0, gy = v * 9.0;
+        const ix = Math.floor(gx), iy = Math.floor(gy);
+        for (let oy = -1; oy <= 1; oy++) {
+          for (let ox = -1; ox <= 1; ox++) {
+            const cx = ((ix + ox) % 9 + 9) % 9;
+            const cy = ((iy + oy) % 9 + 9) % 9;
+            const h1 = ((Math.sin(cx * 127.1 + cy * 311.7 + seed) * 43758.5453) % 1 + 1) % 1;
+            const h2 = ((Math.sin(cx * 269.5 + cy * 183.3 + seed) * 43758.5453) % 1 + 1) % 1;
+            const px = ix + ox + 0.15 + 0.7 * h1;
+            const py = iy + oy + 0.15 + 0.7 * h2;
+            const d = Math.hypot(gx - px, gy - py);
+            if (d < minD) minD = d;
+          }
+        }
+        const pebble = clamp(1.0 - minD * 1.15, 0, 1);
+        const mossTuft = clamp(noise.fbm(ax * 6.5 + 11.3, by * 6.5 + 4.1, 4) * 0.65 + 0.5, 0, 1);
+        const idx = (y * nw + x) * 4;
+        matBytes[idx + 0] = Math.round(fbmV * 255);
+        matBytes[idx + 1] = Math.round(barkV * 255);
+        matBytes[idx + 2] = Math.round(pebble * 255);
+        matBytes[idx + 3] = Math.round(mossTuft * 255);
+      }
+    }
+    const matTex = createTexture2D(nw, nh, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, matBytes, gl.LINEAR, gl.REPEAT);
+    gl.bindTexture(gl.TEXTURE_2D, matTex);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    return { leafTex, matTex };
+  }
+
+  // =========================================================================
+  // 4. World Terrain Heightfield & Shoreline Geometry Builder
+  // =========================================================================
+  function createTerrainModel(seed) {
+    const noise = new Noise2D(seed);
+    const rng = new PRNG(seed ^ 0x517cc1b7);
+
+    // Basin bounds: x in [-150, 150], z in [1, 185] (fully covers entire camera frustum)
+    const X_MIN = -150, X_MAX = 150, Z_MIN = 1, Z_MAX = 185;
+    const lakeShiftX = rng.range(-1.8, 1.8);
+
+    function sampleHeight(x, z) {
+      // Lake runs down center, curving gently into a misty alpine cove around z=95..150
+      const curveX = Math.sin(z * 0.032 + 0.35) * 4.5 + lakeShiftX;
+      const dx = x - curveX;
+
+      // Lake half-width narrows in midground to create romantic fjord/cove framing
+      const widthBase = 13.5 + 8.5 * Math.sin(z * 0.025) - smoothstep(95.0, 165.0, z) * 9.0;
+      const shoreNoise = noise.fbm(x * 0.06 + 4.2, z * 0.06 - 1.7, 4) * 5.2
+                       + noise.fbm(x * 0.18, z * 0.18, 3) * 1.1;
+
+      // Left & right foreground mossy peninsulas clearly framed inside camera frustum
+      const leftPeninsula = Math.exp(-Math.pow((x + 11.2) / 6.2, 2) - Math.pow((z - 21.0) / 6.5, 2)) * 2.4;
+      const rightPeninsula = Math.exp(-Math.pow((x - 12.0) / 6.5, 2) - Math.pow((z - 19.5) / 6.5, 2)) * 2.6;
+
+      const distFromChannel = Math.abs(dx) - widthBase + shoreNoise;
+      // Far shore closes gently at z = 148..184 so distant mountain foothills rise seamlessly behind it
+      const farShoreRise = smoothstep(148.0, 184.0, z) * 3.8;
+      // Near camera shallow mossy corners at bottom-left & bottom-right
+      const nearCornerLeft = Math.exp(-Math.pow((x + 7.2) / 4.8, 2) - Math.pow((z - 9.2) / 3.8, 2)) * 1.45;
+      const nearCornerRight = Math.exp(-Math.pow((x - 7.8) / 4.8, 2) - Math.pow((z - 8.8) / 3.8, 2)) * 1.50;
+
+      let h = -2.45;
+      if (distFromChannel > -10.0) {
+        const bankT = smoothstep(-10.0, 20.0, distFromChannel);
+        h = mix(-2.45, 5.4, bankT);
+        h += Math.max(0.0, distFromChannel) * 0.21;
+      }
+      h += leftPeninsula + rightPeninsula + nearCornerLeft + nearCornerRight + farShoreRise;
+      h += noise.fbm(x * 0.12 + 12.0, z * 0.12 - 8.0, 4) * (h > -0.4 ? 0.95 : 0.42) * (1.0 - smoothstep(150.0, 185.0, z) * 0.7);
+      h += noise.ridged(x * 0.045, z * 0.045, 3) * smoothstep(2.0, 12.0, Math.abs(dx) - widthBase) * 2.4;
+
+      // Keep foreground central camera corridor submerged and crystal-clear (0.35m to 1.8m deep)
+      const camCorridor = Math.exp(-Math.pow(x / 5.2, 2) - Math.pow((z - 10.0) / 6.5, 2));
+      h -= camCorridor * 0.85;
+
+      return h;
+    }
+
+    function sampleNormal(x, z) {
+      const eps = 0.25;
+      const hL = sampleHeight(x - eps, z);
+      const hR = sampleHeight(x + eps, z);
+      const hD = sampleHeight(x, z - eps);
+      const hU = sampleHeight(x, z + eps);
+      return norm3([hL - hR, 2.0 * eps, hD - hU]);
+    }
+
+    // Build terrain triangle mesh (220 x 220 dense near camera using non-linear z distribution)
+    const NX = 210, NZ = 210;
+    const vertCount = (NX + 1) * (NZ + 1);
+    const pos = new Float32Array(vertCount * 3);
+    const nor = new Float32Array(vertCount * 3);
+    const uv = new Float32Array(vertCount * 2);
+    const meta = new Float32Array(vertCount * 4);
+
+    let vi = 0;
+    for (let j = 0; j <= NZ; j++) {
+      const tz = j / NZ;
+      // Higher vertex density in foreground/midground!
+      const z = mix(Z_MIN, Z_MAX, Math.pow(tz, 1.48));
+      for (let i = 0; i <= NX; i++) {
+        const tx = i / NX;
+        const x = mix(X_MIN, X_MAX, tx);
+        const y = sampleHeight(x, z);
+        const n = sampleNormal(x, z);
+        const moist = clamp(1.0 - smoothstep(-0.3, 3.2, y) + noise.fbm(x * 0.2, z * 0.2, 3) * 0.25, 0, 1);
+        const ao = clamp(0.65 + 0.35 * n[1], 0.35, 1.0);
+
+        pos[vi * 3 + 0] = x;
+        pos[vi * 3 + 1] = y;
+        pos[vi * 3 + 2] = z;
+        nor[vi * 3 + 0] = n[0];
+        nor[vi * 3 + 1] = n[1];
+        nor[vi * 3 + 2] = n[2];
+        uv[vi * 2 + 0] = x * 0.14;
+        uv[vi * 2 + 1] = z * 0.14;
+        meta[vi * 4 + 0] = 0.0; // materialID 0 = terrain
+        meta[vi * 4 + 1] = moist;
+        meta[vi * 4 + 2] = ao;
+        meta[vi * 4 + 3] = noise.fbm(x * 0.08, z * 0.08, 3) * 0.5 + 0.5;
+        vi++;
+      }
+    }
+
+    const indices = new Uint32Array(NX * NZ * 6);
+    let ii = 0;
+    for (let j = 0; j < NZ; j++) {
+      for (let i = 0; i < NX; i++) {
+        const a = j * (NX + 1) + i;
+        const b = a + 1;
+        const c = a + (NX + 1);
+        const d = c + 1;
+        indices[ii++] = a; indices[ii++] = c; indices[ii++] = b;
+        indices[ii++] = b; indices[ii++] = c; indices[ii++] = d;
+      }
+    }
+
+    return { pos, nor, uv, meta, indices, sampleHeight, sampleNormal, noise };
+  }
+
+  // =========================================================================
+  // 5. Procedural 3D Geometry Builders (Trees, Leaves, Mossy Rocks, Flowers)
+  // =========================================================================
+  class MeshAccumulator {
+    constructor() {
+      this.pos = [];
+      this.nor = [];
+      this.uv = [];
+      this.meta = [];
+      this.idx = [];
+      this.vCount = 0;
+    }
+    addVertex(p, n, u, v, m0, m1, m2, m3) {
+      this.pos.push(p[0], p[1], p[2]);
+      this.nor.push(n[0], n[1], n[2]);
+      this.uv.push(u, v);
+      this.meta.push(m0, m1, m2, m3);
+      return this.vCount++;
+    }
+    addTri(a, b, c) {
+      this.idx.push(a, b, c);
+    }
+    appendFrom(other) {
+      const base = this.vCount;
+      for (let i = 0; i < other.pos.length; i++) this.pos.push(other.pos[i]);
+      for (let i = 0; i < other.nor.length; i++) this.nor.push(other.nor[i]);
+      for (let i = 0; i < other.uv.length; i++) this.uv.push(other.uv[i]);
+      for (let i = 0; i < other.meta.length; i++) this.meta.push(other.meta[i]);
+      for (let i = 0; i < other.idx.length; i++) this.idx.push(other.idx[i] + base);
+      this.vCount += other.vCount;
+    }
+  }
+
+  // Build displaced 3D granite boulder with crevices & moss flags
+  function addMossyBoulder(acc, cx, cy, cz, rx, ry, rz, rotY, noise, rng) {
+    // Subdivided icosahedron (subdiv=3 -> 642 verts, 1280 tris: crisp organic granite facets!)
+    const t = (1 + Math.sqrt(5)) / 2;
+    let verts = [
+      [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+      [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+      [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]
+    ].map(norm3);
+    let faces = [
+      [0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],
+      [1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
+      [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],
+      [4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1]
+    ];
+
+    for (let s = 0; s < 3; s++) {
+      const midCache = new Map();
+      const getMid = (a, b) => {
+        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+        if (midCache.has(key)) return midCache.get(key);
+        const m = norm3([(verts[a][0]+verts[b][0])*0.5, (verts[a][1]+verts[b][1])*0.5, (verts[a][2]+verts[b][2])*0.5]);
+        const id = verts.length;
+        verts.push(m);
+        midCache.set(key, id);
+        return id;
+      };
+      const newFaces = [];
+      for (const [a, b, c] of faces) {
+        const ab = getMid(a, b), bc = getMid(b, c), ca = getMid(c, a);
+        newFaces.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]);
+      }
+      faces = newFaces;
+    }
+
+    const seedOff = rng.range(0, 100);
+    const cr = Math.cos(rotY), sr = Math.sin(rotY);
+    const worldVerts = verts.map(v => {
+      const n1 = noise.fbm(v[0] * 2.1 + seedOff, v[1] * 2.1 - v[2] * 1.7, 4);
+      const n2 = noise.ridged(v[0] * 3.4 - seedOff, v[2] * 3.4 + v[1] * 2.5, 4);
+      const disp = 0.72 + 0.34 * n1 + 0.22 * n2;
+      const flatY = v[1] < -0.2 ? v[1] * 0.62 : v[1];
+      const lx = v[0] * rx * disp;
+      const ly = flatY * ry * disp;
+      const lz = v[2] * rz * disp;
+      return [
+        cx + lx * cr - lz * sr,
+        cy + ly,
+        cz + lx * sr + lz * cr
+      ];
+    });
+
+    // Compute smooth-faceted rock normals
+    const accumNor = worldVerts.map(() => [0, 0, 0]);
+    for (const [a, b, c] of faces) {
+      const fn = cross3(sub3(worldVerts[b], worldVerts[a]), sub3(worldVerts[c], worldVerts[a]));
+      for (const id of [a, b, c]) {
+        accumNor[id][0] += fn[0];
+        accumNor[id][1] += fn[1];
+        accumNor[id][2] += fn[2];
+      }
+    }
+
+    const base = acc.vCount;
+    const mossRichness = rng.range(0.65, 1.15);
+    for (let i = 0; i < worldVerts.length; i++) {
+      const p = worldVerts[i];
+      const n = norm3(accumNor[i]);
+      const ao = clamp(0.45 + 0.55 * smoothstep(-0.6, 0.8, verts[i][1]), 0.25, 1.0);
+      acc.addVertex(
+        p, n,
+        p[0] * 0.45 + p[2] * 0.35, p[1] * 0.45 + p[2] * 0.25,
+        1.0, // materialID 1 = mossy rock
+        mossRichness,
+        ao,
+        (cx * 0.3 + cz * 0.7) & 1023
+      );
+    }
+    for (const [a, b, c] of faces) {
+      acc.addTri(base + a, base + b, base + c);
+    }
+  }
+
+  // Generate 3D gnarled tree trunk/branches + thousands of individually calculated leaf instances
+  function buildFractalForest(terrain, seed) {
+    const rng = new PRNG(seed ^ 0x243f6a88);
+    const noise = terrain.noise;
+    const meshAcc = new MeshAccumulator();
+    const leafInstances = []; // { x, y, z, size, angle, tilt, ao, sunExp, type, phase, hue, amp }
+
+    // Helper: extrude a curved tapered 3D branch chain
+    function emitBranchTube(points, radii, radialSegs, mossBase) {
+      const rings = [];
+      let prevTangent = norm3(sub3(points[1], points[0]));
+      let ref = Math.abs(prevTangent[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+      let side = norm3(cross3(prevTangent, ref));
+
+      let arcLen = 0;
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        if (i > 0) arcLen += len3(sub3(p, points[i - 1]));
+        const tan = i === 0
+          ? norm3(sub3(points[1], points[0]))
+          : i === points.length - 1
+            ? norm3(sub3(points[i], points[i - 1]))
+            : norm3(sub3(points[i + 1], points[i - 1]));
+
+        // Parallel transport frame to avoid twisting seams
+        side = norm3(sub3(side, mul3(tan, dot3(side, tan))));
+        const binorm = norm3(cross3(tan, side));
+        const r = radii[i];
+        const ring = [];
+        for (let k = 0; k <= radialSegs; k++) {
+          const ang = (k / radialSegs) * Math.PI * 2;
+          const ca = Math.cos(ang), sa = Math.sin(ang);
+          const nDir = norm3(add3(mul3(side, ca), mul3(binorm, sa)));
+          // Bark flute undulation near base
+          const flute = 1.0 + (i < 2 ? 0.18 * Math.sin(ang * 5.0 + p[1]) : 0.05 * Math.sin(ang * 4.0 + arcLen * 2.0));
+          const vp = add3(p, mul3(nDir, r * flute));
+          const moss = clamp(mossBase * (1.0 - smoothstep(0.0, 5.5, p[1] - terrain.sampleHeight(p[0], p[2]))) + Math.max(0, nDir[1]) * 0.45, 0, 1);
+          const ao = clamp(0.55 + 0.45 * Math.max(0, nDir[1]), 0.3, 1.0);
+          const vid = meshAcc.addVertex(vp, nDir, k / radialSegs * 2.0, arcLen * 0.65, 2.0, moss, ao, (p[0] + p[2]) * 0.1);
+          ring.push(vid);
+        }
+        rings.push(ring);
+      }
+
+      for (let i = 0; i < rings.length - 1; i++) {
+        for (let k = 0; k < radialSegs; k++) {
+          const a = rings[i][k], b = rings[i][k + 1];
+          const c = rings[i + 1][k], d = rings[i + 1][k + 1];
+          meshAcc.addTri(a, b, c);
+          meshAcc.addTri(b, d, c);
+        }
+      }
+    }
+
+    function addFoliageCluster(tipPos, dir, radius, count, isPine, treeSunBias) {
+      for (let i = 0; i < count; i++) {
+        // Spherical/ellipsoidal leaf clumping around twig tip
+        const th = rng.range(0, Math.PI * 2);
+        const ph = Math.acos(rng.range(-0.65, 1.0));
+        const r = Math.pow(rng.next(), 0.55) * radius;
+        const ox = Math.sin(ph) * Math.cos(th) * r;
+        const oy = Math.cos(ph) * r * (isPine ? 0.52 : 0.68);
+        const oz = Math.sin(ph) * Math.sin(th) * r;
+        const lx = tipPos[0] + ox + dir[0] * radius * 0.22;
+        const ly = tipPos[1] + oy + dir[1] * radius * 0.16;
+        const lz = tipPos[2] + oz + dir[2] * radius * 0.22;
+
+        // Strong 3D crown volume: dark shadowed inner/lower underside, sunlit outer/upper rim!
+        const distRatio = r / (radius || 1);
+        const upFactor = clamp(oy / (radius || 1) * 0.5 + 0.5, 0, 1);
+        const sunSide = clamp((-ox * 0.18 + oy * 0.65 + oz * 0.4) / (radius || 1) * 0.5 + 0.5, 0, 1);
+        const ao = clamp(0.18 + 0.54 * distRatio + 0.34 * upFactor, 0.15, 1.0);
+        const sunExp = clamp(0.08 + 0.62 * sunSide * distRatio + treeSunBias * 0.28, 0.04, 1.0);
+
+        leafInstances.push({
+          x: lx, y: ly, z: lz,
+          size: isPine ? rng.range(0.28, 0.52) : rng.range(0.20, 0.38),
+          angle: rng.range(0, Math.PI * 2),
+          tilt: rng.range(-0.4, 0.4),
+          ao,
+          sunExp,
+          type: isPine ? 1.0 : 0.0,
+          phase: rng.range(0, Math.PI * 2),
+          hue: rng.signed(),
+          amp: rng.range(0.025, 0.065)
+        });
+      }
+    }
+
+    // Recursive ancient broadleaf tree
+    function growAncientBroadleaf(baseX, baseZ, height, trunkRadius, leanX, leanZ, crownScale, leafBudget) {
+      const groundY = terrain.sampleHeight(baseX, baseZ);
+      const basePos = [baseX, groundY - 0.35, baseZ];
+
+      // 5 gnarled root flares gripping earth & shoreline
+      for (let r = 0; r < 5; r++) {
+        const ang = (r / 5) * Math.PI * 2 + rng.range(-0.35, 0.35);
+        const rLen = trunkRadius * rng.range(3.2, 5.2);
+        const rx = baseX + Math.cos(ang) * rLen;
+        const rz = baseZ + Math.sin(ang) * rLen;
+        const ry = terrain.sampleHeight(rx, rz) - 0.18;
+        const mid = [
+          mix(baseX, rx, 0.48),
+          mix(groundY + trunkRadius * 0.65, ry, 0.45) + 0.22,
+          mix(baseZ, rz, 0.48)
+        ];
+        emitBranchTube(
+          [[baseX, groundY + trunkRadius * 0.9, baseZ], mid, [rx, ry, rz]],
+          [trunkRadius * 0.62, trunkRadius * 0.34, trunkRadius * 0.08],
+          7, 0.85
+        );
+      }
+
+      const sunDir = norm3([-0.18, 0.145, 0.972]);
+      function branch(pos, dir, len, rad, depth) {
+        const segs = depth <= 1 ? 5 : 3;
+        const pts = [pos];
+        const rads = [rad];
+        let cur = pos.slice();
+        let d = dir.slice();
+        for (let s = 1; s <= segs; s++) {
+          const step = len / segs;
+          // Organic gnarl + phototropic upward/lakeward reach
+          const gnarl = depth <= 2 ? 0.14 : 0.24;
+          d = norm3([
+            d[0] + noise.noise(cur[0] * 0.4, cur[1] * 0.4) * gnarl + rng.signed() * 0.07,
+            d[1] + 0.05 * depth + (depth >= 3 ? -0.04 : 0.03),
+            d[2] + noise.noise(cur[2] * 0.4, cur[1] * 0.4) * gnarl * 0.7
+          ]);
+          cur = add3(cur, mul3(d, step));
+          pts.push(cur.slice());
+          rads.push(mix(rad, rad * (depth >= 4 ? 0.25 : 0.68), s / segs));
+        }
+        emitBranchTube(pts, rads, depth === 0 ? 10 : depth <= 2 ? 7 : 5, depth === 0 ? 0.75 : 0.32);
+
+        if (depth >= 2) {
+          const sunBias = clamp(dot3(d, sunDir) * 0.5 + 0.5, 0, 1);
+          const clCount = depth === 2 ? Math.round(leafBudget / 95) : depth === 3 ? Math.round(leafBudget / 60) : Math.round(leafBudget / 36);
+          addFoliageCluster(cur, d, (depth === 2 ? 0.72 : depth === 3 ? 0.98 : 1.25) * crownScale, clCount, false, sunBias);
+        }
+        if (depth >= 4 || rad < 0.03) return;
+
+        const numChildren = depth === 0 ? 3 : 2;
+        for (let c = 0; c < numChildren; c++) {
+          const yaw = (c / numChildren) * Math.PI * 2 + rng.range(-0.5, 0.5) + depth * 1.1;
+          const spread = depth === 0 ? rng.range(0.40, 0.68) : rng.range(0.38, 0.78);
+          const upRef = Math.abs(d[1]) < 0.92 ? [0, 1, 0] : [1, 0, 0];
+          const s1 = norm3(cross3(d, upRef));
+          const s2 = cross3(d, s1);
+          const lateral = add3(mul3(s1, Math.cos(yaw)), mul3(s2, Math.sin(yaw)));
+          const childDir = norm3(add3(mul3(d, Math.cos(spread)), mul3(lateral, Math.sin(spread))));
+          childDir[0] += leanX * 0.14;
+          const childLen = len * rng.range(0.66, 0.80);
+          // Smooth botanical join (no abrupt step-narrowing at forks!)
+          const childRad = rads[rads.length - 1] * rng.range(0.84, 0.94);
+          const overlapStart = pts[pts.length - 1];
+          branch(overlapStart, norm3(childDir), childLen, childRad, depth + 1);
+        }
+      }
+
+      const initDir = norm3([leanX, 1.0, leanZ]);
+      branch(basePos, initDir, height * 0.38, trunkRadius, 0);
+    }
+
+    // Recursive towering ancient alpine pine
+    function growAncientPine(baseX, baseZ, height, trunkRadius, leanX, leanZ, needleBudget) {
+      const groundY = terrain.sampleHeight(baseX, baseZ);
+      const pts = [];
+      const rads = [];
+      const segs = 10;
+      let cur = [baseX, groundY - 0.35, baseZ];
+      let dir = norm3([leanX, 1.0, leanZ]);
+      for (let i = 0; i <= segs; i++) {
+        const t = i / segs;
+        pts.push(cur.slice());
+        rads.push(trunkRadius * Math.pow(1.0 - t * 0.92, 0.82));
+        dir = norm3([
+          dir[0] + noise.noise(cur[1] * 0.25, baseX) * 0.06,
+          1.0,
+          dir[2] + noise.noise(cur[1] * 0.25, baseZ) * 0.06
+        ]);
+        cur = add3(cur, mul3(dir, height / segs));
+      }
+      emitBranchTube(pts, rads, 8, 0.58);
+
+      // Whorls of sweeping pine boughs from 34% up to apex (clothed in dense needle sprays)
+      const whorls = 14;
+      for (let w = 0; w < whorls; w++) {
+        const wt = mix(0.34, 0.96, w / (whorls - 1));
+        const segFloat = wt * segs;
+        const si = Math.min(segs - 1, Math.floor(segFloat));
+        const sf = segFloat - si;
+        const origin = [
+          mix(pts[si][0], pts[si + 1][0], sf),
+          mix(pts[si][1], pts[si + 1][1], sf),
+          mix(pts[si][2], pts[si + 1][2], sf)
+        ];
+        const boughsInWhorl = wt > 0.8 ? 4 : 5;
+        const boughLenMax = height * 0.29 * (1.0 - wt * 0.72) * rng.range(0.85, 1.18);
+        for (let b = 0; b < boughsInWhorl; b++) {
+          const ang = (b / boughsInWhorl) * Math.PI * 2 + w * 0.9 + rng.range(-0.3, 0.3);
+          const bx = Math.cos(ang), bz = Math.sin(ang);
+          const bPts = [origin];
+          const bRads = [trunkRadius * 0.16 * (1.0 - wt * 0.55)];
+          let bc = origin.slice();
+          for (let k = 1; k <= 4; k++) {
+            const kt = k / 4;
+            const droop = -0.30 * Math.sin(kt * Math.PI * 0.8) + (kt > 0.7 ? 0.22 : 0.0);
+            bc = [
+              bc[0] + bx * (boughLenMax / 4),
+              bc[1] + droop * (boughLenMax / 4),
+              bc[2] + bz * (boughLenMax / 4)
+            ];
+            bPts.push(bc.slice());
+            bRads.push(bRads[0] * (1.0 - kt * 0.85));
+            const cnt = Math.round((needleBudget / (whorls * 6.5)) * (1.15 - wt * 0.45));
+            addFoliageCluster(bc, [bx, 0.2, bz], 0.88 * (1.0 - wt * 0.40), Math.max(4, cnt), true, 0.45 + 0.35 * wt);
+          }
+          emitBranchTube(bPts, bRads, 4, 0.22);
+        }
+      }
+      // Crown apex cluster
+      addFoliageCluster(pts[pts.length - 1], [0, 1, 0], 0.95, 24, true, 0.85);
+    }
+
+    // ---- Curated Hero Composition Placements (Left Repoussoir, Right Grove, Midground Shores) ----
+    // 1. Massive Hero Patriarch Oak on Left Peninsula overhanging lake & framing sunrise
+    growAncientBroadleaf(-11.2, 21.5, 11.8, 0.72, 0.36, 0.05, 1.12, 2200);
+    // Secondary gnarled oak behind left hero
+    growAncientBroadleaf(-17.8, 28.0, 12.6, 0.62, 0.18, -0.04, 1.05, 1500);
+    // Left towering ancient pines behind/beside oak
+    growAncientPine(-15.5, 25.0, 15.8, 0.48, 0.05, 0.02, 1200);
+    growAncientPine(-23.5, 36.0, 19.5, 0.56, 0.04, 0.0, 1100);
+    growAncientPine(-17.5, 45.0, 17.5, 0.48, 0.07, -0.02, 900);
+
+    // 2. Right Foreground Sanctuary Grove (Ancient Pines + Overhanging Broadleaf)
+    growAncientPine(12.2, 20.5, 16.5, 0.52, -0.08, 0.02, 1300);
+    growAncientBroadleaf(15.8, 24.5, 12.2, 0.64, -0.28, 0.04, 1.08, 1700);
+    growAncientPine(20.5, 31.0, 20.5, 0.58, -0.04, -0.02, 1100);
+    growAncientPine(16.5, 39.0, 18.2, 0.52, -0.06, 0.0, 900);
+    growAncientPine(26.5, 48.0, 21.0, 0.58, -0.03, 0.0, 800);
+
+    // 3. Midground Shore Trees lining the misty lake cove
+    const midLeftCount = 8;
+    for (let i = 0; i < midLeftCount; i++) {
+      const z = mix(54, 132, i / (midLeftCount - 1)) + rng.range(-3, 3);
+      const x = -22 - rng.range(0, 14) + Math.sin(z * 0.032 + 0.35) * 4.5;
+      if (i % 3 === 1) {
+        growAncientBroadleaf(x, z, rng.range(11, 15), rng.range(0.45, 0.62), 0.14, 0, 1.0, 650);
+      } else {
+        growAncientPine(x, z, rng.range(15, 22), rng.range(0.42, 0.58), 0.03, 0, 550);
+      }
+    }
+    const midRightCount = 9;
+    for (let i = 0; i < midRightCount; i++) {
+      const z = mix(52, 136, i / (midRightCount - 1)) + rng.range(-3, 3);
+      const x = 21 + rng.range(0, 14) + Math.sin(z * 0.032 + 0.35) * 4.5;
+      if (i % 4 === 2) {
+        growAncientBroadleaf(x, z, rng.range(11, 14), rng.range(0.44, 0.60), -0.14, 0, 1.0, 650);
+      } else {
+        growAncientPine(x, z, rng.range(15, 23), rng.range(0.42, 0.60), -0.03, 0, 550);
+      }
+    }
+
+    // 4. Moss-Covered Shoreline & Partially Submerged Boulders (deeply embedded into terrain!)
+    const boulderZones = [
+      // Left bank & shallow edge (clearly visible in lower-left third)
+      { x: -7.8,  z: 14.5, rx: 1.45, ry: 0.92, rz: 1.25 },
+      { x: -6.4,  z: 16.5, rx: 1.05, ry: 0.68, rz: 0.95 },
+      { x: -9.4,  z: 12.2, rx: 1.25, ry: 0.78, rz: 1.15 },
+      { x: -6.2,  z: 19.5, rx: 0.92, ry: 0.58, rz: 0.85 },
+      { x: -6.8,  z: 9.8,  rx: 1.15, ry: 0.72, rz: 1.02 },
+      // Right bank & shallow edge (clearly visible in lower-right third)
+      { x: 8.2,   z: 13.8, rx: 1.52, ry: 0.95, rz: 1.32 },
+      { x: 6.8,   z: 15.8, rx: 1.02, ry: 0.65, rz: 0.92 },
+      { x: 9.8,   z: 11.5, rx: 1.28, ry: 0.80, rz: 1.18 },
+      { x: 5.9,   z: 13.0, rx: 0.82, ry: 0.52, rz: 0.75 },
+      { x: 7.4,   z: 9.2,  rx: 1.18, ry: 0.74, rz: 1.05 },
+      // Submerged stepping stones in crystal-clear foreground water
+      { x: -2.4,  z: 11.2, rx: 0.72, ry: 0.38, rz: 0.64 },
+      { x: 2.1,   z: 10.4, rx: 0.64, ry: 0.34, rz: 0.58 },
+      { x: -0.8,  z: 14.0, rx: 0.82, ry: 0.42, rz: 0.72 },
+      { x: 3.6,   z: 13.2, rx: 0.84, ry: 0.46, rz: 0.75 }
+    ];
+    for (const b of boulderZones) {
+      const gx = b.x + rng.range(-0.3, 0.3);
+      const gz = b.z + rng.range(-0.3, 0.3);
+      const gy = terrain.sampleHeight(gx, gz);
+      addMossyBoulder(meshAcc, gx, gy + b.ry * 0.04, gz, b.rx, b.ry, b.rz, rng.range(0, Math.PI * 2), noise, rng);
+    }
+    // Scatter smaller shoreline stones seated cleanly on bank/bed
+    for (let i = 0; i < 36; i++) {
+      const side = i % 2 === 0 ? -1 : 1;
+      const gx = side * rng.range(4.8, 15.5);
+      const gz = rng.range(8.5, 30.0);
+      const gy = terrain.sampleHeight(gx, gz);
+      if (gy > -1.3 && gy < 2.2) {
+        addMossyBoulder(meshAcc, gx, gy - 0.04, gz, rng.range(0.30, 0.68), rng.range(0.20, 0.44), rng.range(0.28, 0.64), rng.range(0, 6.28), noise, rng);
+      }
+    }
+
+    // 5. Ferns, Shoreline Reeds & Glowing Fantasy Wildflowers
+    function addFernCluster(fx, fz, scale) {
+      const fy = terrain.sampleHeight(fx, fz);
+      if (fy < 0.04) return;
+      const blades = 10;
+      for (let b = 0; b < blades; b++) {
+        const ang = (b / blades) * Math.PI * 2 + rng.range(-0.3, 0.3);
+        const bx = Math.cos(ang), bz = Math.sin(ang);
+        const len = rng.range(0.45, 0.88) * scale;
+        const arch = rng.range(0.35, 0.68) * scale;
+        const w = 0.036 * scale;
+        const side = [-bz, 0, bx];
+        const segs = 4;
+        let prevL = -1, prevR = -1;
+        const phase = rng.range(0, 6.28);
+        for (let s = 0; s <= segs; s++) {
+          const t = s / segs;
+          const p = [
+            fx + bx * len * t,
+            fy + Math.sin(t * Math.PI * 0.72) * arch - t * t * 0.18 * scale,
+            fz + bz * len * t
+          ];
+          const cw = w * Math.sin(Math.pow(t, 0.6) * Math.PI);
+          const n = norm3([-bx * 0.2, 1.0, -bz * 0.2]);
+          const vL = meshAcc.addVertex(add3(p, mul3(side, -cw)), n, 0, t, 3.0, t, 0.7, phase);
+          const vR = meshAcc.addVertex(add3(p, mul3(side, cw)), n, 1, t, 3.0, t, 0.7, phase);
+          if (s > 0) {
+            meshAcc.addTri(prevL, vL, prevR);
+            meshAcc.addTri(prevR, vL, vR);
+          }
+          prevL = vL; prevR = vR;
+        }
+      }
+    }
+
+    function addGlowingWildflower(fx, fz, hueType) {
+      const fy = terrain.sampleHeight(fx, fz);
+      if (fy < 0.08) return;
+      const stemH = rng.range(0.42, 0.78);
+      const leanX = rng.range(-0.18, 0.18);
+      const leanZ = rng.range(-0.18, 0.18);
+      const phase = rng.range(0, 6.28);
+      // Curved slender stem
+      const top = [fx + leanX, fy + stemH, fz + leanZ];
+      const mid = [fx + leanX * 0.35, fy + stemH * 0.55, fz + leanZ * 0.35];
+      const sW = 0.022;
+      const v0 = meshAcc.addVertex([fx - sW, fy, fz], [0, 1, 0], 0, 0, 3.0, 0.3, 0.75, phase);
+      const v1 = meshAcc.addVertex([fx + sW, fy, fz], [0, 1, 0], 1, 0, 3.0, 0.3, 0.75, phase);
+      const v2 = meshAcc.addVertex([mid[0] - sW, mid[1], mid[2]], [0, 1, 0], 0, 0.5, 3.0, 0.6, 0.85, phase);
+      const v3 = meshAcc.addVertex([mid[0] + sW, mid[1], mid[2]], [0, 1, 0], 1, 0.5, 3.0, 0.6, 0.85, phase);
+      const v4 = meshAcc.addVertex([top[0] - sW * 0.6, top[1], top[2]], [0, 1, 0], 0, 1, 3.0, 1.0, 0.95, phase);
+      const v5 = meshAcc.addVertex([top[0] + sW * 0.6, top[1], top[2]], [0, 1, 0], 1, 1, 3.0, 1.0, 0.95, phase);
+      meshAcc.addTri(v0, v2, v1); meshAcc.addTri(v1, v2, v3);
+      meshAcc.addTri(v2, v4, v3); meshAcc.addTri(v3, v4, v5);
+
+      // 5 glowing flower petals arranged as a delicate cup blossom
+      const petals = 5;
+      const pLen = rng.range(0.14, 0.22);
+      const pWid = pLen * 0.52;
+      const centerV = meshAcc.addVertex(top, [0, 1, 0], 0.5, 0.0, 4.0, hueType, 1.0, phase);
+      for (let p = 0; p < petals; p++) {
+        const ang = (p / petals) * Math.PI * 2 + rng.range(-0.15, 0.15);
+        const dir = [Math.cos(ang), 0.42, Math.sin(ang)];
+        const side = [-Math.sin(ang), 0, Math.cos(ang)];
+        const midP = add3(top, mul3(dir, pLen * 0.55));
+        const tipP = add3(top, mul3(dir, pLen));
+        tipP[1] += 0.04;
+        const pL = meshAcc.addVertex(add3(midP, mul3(side, -pWid)), [0, 1, 0], 0.0, 0.55, 4.0, hueType, 1.0, phase);
+        const pR = meshAcc.addVertex(add3(midP, mul3(side, pWid)), [0, 1, 0], 1.0, 0.55, 4.0, hueType, 1.0, phase);
+        const pT = meshAcc.addVertex(tipP, [0, 1, 0], 0.5, 1.0, 4.0, hueType, 1.0, phase);
+        meshAcc.addTri(centerV, pL, pT);
+        meshAcc.addTri(centerV, pT, pR);
+      }
+    }
+
+    // Populate lush shoreline ferns & glowing wildflowers on visible foreground banks
+    for (let i = 0; i < 180; i++) {
+      const side = i % 2 === 0 ? -1 : 1;
+      const fx = side * rng.range(5.2, 16.5);
+      const fz = rng.range(8.5, 30.0);
+      addFernCluster(fx, fz, rng.range(0.65, 1.35));
+    }
+    for (let i = 0; i < 110; i++) {
+      const side = i % 2 === 0 ? -1 : 1;
+      const fx = side * rng.range(5.4, 15.5);
+      const fz = rng.range(8.8, 26.5);
+      // Hue mix: warm starlight gold (0.15), enchanted moon-cyan (0.55), soft rose-lavender (0.88)
+      const hueType = i % 3 === 0 ? 0.15 : i % 3 === 1 ? 0.55 : 0.88;
+      addGlowingWildflower(fx, fz, hueType);
+    }
+
+    // Pack leaf instance buffer (12 floats per instance -> 3 vec4 attributes)
+    const leafData = new Float32Array(leafInstances.length * 12);
+    for (let i = 0; i < leafInstances.length; i++) {
+      const L = leafInstances[i];
+      const o = i * 12;
+      leafData[o + 0] = L.x;
+      leafData[o + 1] = L.y;
+      leafData[o + 2] = L.z;
+      leafData[o + 3] = L.size;
+      leafData[o + 4] = L.angle;
+      leafData[o + 5] = L.tilt;
+      leafData[o + 6] = L.ao;
+      leafData[o + 7] = L.sunExp;
+      leafData[o + 8] = L.type;
+      leafData[o + 9] = L.phase;
+      leafData[o + 10] = L.hue;
+      leafData[o + 11] = L.amp;
+    }
+
+    return {
+      mesh: meshAcc,
+      leafData,
+      leafCount: leafInstances.length
+    };
+  }
+
+  // Build 1,800 HDR particle attributes (sunlit dust motes, glowing spores, morning lake vapor)
+  function createParticles(seed) {
+    const rng = new PRNG(seed ^ 0x13198a2e);
+    const count = 1800;
+    const data = new Float32Array(count * 8);
+    for (let i = 0; i < count; i++) {
+      const o = i * 8;
+      const kind = i < 950 ? 0.0 : i < 1500 ? 1.0 : 2.0; // 0=sun pollen, 1=glowing forest spore, 2=soft mist wisp
+      let x, y, z, size;
+      if (kind === 0.0) {
+        x = rng.range(-20, 20);
+        y = rng.range(0.4, 15.0);
+        z = rng.range(6.0, 48.0);
+        size = rng.range(0.035, 0.095);
+      } else if (kind === 1.0) {
+        const side = i % 2 === 0 ? -1 : 1;
+        x = side * rng.range(6.5, 22.0);
+        y = rng.range(0.3, 4.8);
+        z = rng.range(7.5, 32.0);
+        size = rng.range(0.045, 0.11);
+      } else {
+        x = rng.range(-24, 24);
+        y = rng.range(0.15, 2.2);
+        z = rng.range(18.0, 95.0);
+        size = rng.range(1.6, 3.8);
+      }
+      data[o + 0] = x;
+      data[o + 1] = y;
+      data[o + 2] = z;
+      data[o + 3] = size;
+      data[o + 4] = kind;
+      data[o + 5] = rng.range(0, 6.283);
+      data[o + 6] = rng.range(0.4, 1.3);
+      data[o + 7] = rng.next();
+    }
+    return { data, count };
+  }
+
+  // =========================================================================
+  // 6. GLSL Shaders (300 es)
+  // =========================================================================
+  const FULLSCREEN_VS = `#version 300 es
+  layout(location = 0) in vec2 aPos;
+  out vec2 vUV;
+  void main() {
+    vUV = aPos * 0.5 + 0.5;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+  }`;
+
+  // Pass A: Sky Scattering + Clouds + 3D Raymarched Self-Shadowed Alpine Mountains
+  const BACKDROP_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUV;
+  out vec4 fragColor;
+
+  uniform mat4 uInvViewProj;
+  uniform vec3 uCamPos;
+  uniform vec3 uSunDir;
+  uniform float uMirrorY;
+  uniform float uSeedOffset;
+
+  float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+  }
+
+  float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(
+      mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+      mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
+      u.y
+    );
+  }
+
+  float fbm(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+    for (int i = 0; i < 5; i++) {
+      v += a * noise(p);
+      p = rot * p * 2.04 + 13.7;
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  float ridgedMountain(vec2 p) {
+    float v = 0.0;
+    float a = 0.52;
+    float w = 1.0;
+    mat2 rot = mat2(0.82, -0.57, 0.57, 0.82);
+    for (int i = 0; i < 7; i++) {
+      float n = 1.0 - abs(noise(p) * 2.0 - 1.0);
+      n = n * n * w;
+      w = clamp(n * 1.85, 0.0, 1.0);
+      v += n * a;
+      p = rot * p * 2.13 + 7.13;
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  // Analytical 3D Alpine Mountain Heightfield (starts seamlessly at far shore z > 155)
+  float mountainHeight(vec2 xz) {
+    float z = xz.y;
+    if (z < 155.0) return -5.0;
+    float distScale = smoothstep(155.0, 320.0, z);
+    // Open central-left alpine fjord/valley toward the sunrise (no dark wall blocking valley!)
+    float valleyChannel = 1.0 - 0.88 * exp(-pow((xz.x + z * 0.14) / (z * 0.24), 2.0));
+    float passCarve = 1.0 - 0.65 * exp(-pow((xz.x + z * 0.16) / (z * 0.22), 2.0));
+    float sideWall = 1.0 + 0.48 * smoothstep(0.18, 0.68, abs(xz.x) / max(1.0, z));
+
+    vec2 p = xz * 0.0015 + vec2(uSeedOffset * 0.13, uSeedOffset * 0.07);
+    float r = ridgedMountain(p);
+    float sub = fbm(p * 3.1 + 4.2);
+
+    // Gently rising forested valley sides (open in center) + towering jagged Sierra peaks behind
+    float foothills = smoothstep(155.0, 340.0, z) * (10.0 + 38.0 * sub) * valleyChannel;
+    float peaks = smoothstep(380.0, 1450.0, z) * (105.0 + 380.0 * r) * passCarve * sideWall;
+    return foothills + peaks * distScale;
+  }
+
+  vec3 mountainNormal(vec2 xz, float t) {
+    float eps = max(1.5, t * 0.004);
+    float hL = mountainHeight(xz - vec2(eps, 0.0));
+    float hR = mountainHeight(xz + vec2(eps, 0.0));
+    float hD = mountainHeight(xz - vec2(0.0, eps));
+    float hU = mountainHeight(xz + vec2(0.0, eps));
+    return normalize(vec3(hL - hR, 2.0 * eps, hD - hU));
+  }
+
+  vec3 renderSky(vec3 rd) {
+    float mu = max(dot(rd, uSunDir), 0.0);
+    float elev = clamp(rd.y, 0.0, 1.0);
+
+    // 19th-century Romanticism Sunrise Sky Gradient (deep cobalt zenith -> dusty rose -> amber horizon)
+    vec3 zenith = vec3(0.045, 0.095, 0.24);
+    vec3 midSky = vec3(0.22, 0.29, 0.48);
+    vec3 horizonCool = vec3(0.74, 0.48, 0.42);
+    vec3 horizonWarm = vec3(1.22, 0.68, 0.30);
+
+    vec3 col = mix(horizonCool, midSky, smoothstep(0.01, 0.22, elev));
+    col = mix(col, zenith, smoothstep(0.16, 0.44, elev));
+
+    // Warm Mie sunrise glow concentrated near solar cleft
+    float sunAzGlow = pow(mu, 4.5) * (1.0 - smoothstep(0.0, 0.45, elev));
+    col = mix(col, horizonWarm, clamp(sunAzGlow * 0.85, 0.0, 1.0));
+    col += vec3(1.35, 0.82, 0.36) * pow(mu, 20.0) * 0.58;
+    col += vec3(3.0, 2.1, 1.1) * pow(mu, 260.0) * 1.15;
+
+    // Crisp solar disc
+    float sunDisc = smoothstep(0.9992, 0.9997, mu);
+    col += vec3(9.5, 6.8, 3.6) * sunDisc;
+
+    // Multi-layered domain-warped morning clouds (rich slate-violet tops & blazing coral-gold bellies)
+    if (rd.y > 0.02) {
+      vec2 cloudUV = rd.xz / (rd.y + 0.16);
+      vec2 warp = vec2(fbm(cloudUV * 0.62 + uSeedOffset), fbm(cloudUV * 0.62 + 5.2 - uSeedOffset));
+      float c1 = fbm(cloudUV * 1.15 + warp * 0.85 + vec2(0.0, uSeedOffset * 0.3));
+      float c2 = fbm(cloudUV * 2.5 - warp * 0.45 + 9.4);
+      float density = smoothstep(0.44, 0.72, c1 * 0.70 + c2 * 0.34) * smoothstep(0.02, 0.14, rd.y) * smoothstep(0.85, 0.24, rd.y);
+
+      float lightSample = fbm((cloudUV + uSunDir.xz * 0.12) * 1.15 + warp * 0.85);
+      float cloudSun = clamp((c1 - lightSample) * 3.0 + 0.48, 0.0, 1.0);
+      vec3 cloudShadow = mix(vec3(0.14, 0.17, 0.28), vec3(0.46, 0.28, 0.32), pow(mu, 2.5));
+      vec3 cloudLit = mix(vec3(0.92, 0.58, 0.44), vec3(1.72, 1.12, 0.58), pow(mu, 3.5));
+      vec3 cloudCol = mix(cloudShadow, cloudLit, cloudSun);
+      col = mix(col, cloudCol, density * 0.88);
+    }
+
+    return col;
+  }
+
+  void main() {
+    vec4 ndc = vec4(vUV * 2.0 - 1.0, 1.0, 1.0);
+    vec4 worldFar = uInvViewProj * ndc;
+    worldFar /= worldFar.w;
+    vec3 rd = normalize(worldFar.xyz - uCamPos);
+    if (uMirrorY > 0.5) rd.y = -rd.y;
+
+    vec3 skyCol = renderSky(rd);
+    vec3 col = skyCol;
+    bool hitMountain = false;
+
+    // Raymarch distant 3D mountains in the horizon band
+    if (rd.y > -0.02 && rd.y < 0.38) {
+      float t = 155.0 / max(0.25, rd.z);
+      float tMax = 4400.0;
+      float hitT = -1.0;
+
+      for (int i = 0; i < 120; i++) {
+        vec3 p = uCamPos + rd * t;
+        float h = mountainHeight(p.xz);
+        if (p.y < h) {
+          float lo = t * 0.90;
+          float hi = t;
+          for (int b = 0; b < 6; b++) {
+            float mid = 0.5 * (lo + hi);
+            vec3 mp = uCamPos + rd * mid;
+            if (mp.y < mountainHeight(mp.xz)) hi = mid; else lo = mid;
+          }
+          hitT = 0.5 * (lo + hi);
+          break;
+        }
+        t += max(4.5, t * 0.022);
+        if (t > tMax) break;
+      }
+
+      if (hitT > 0.0) {
+        hitMountain = true;
+        vec3 hp = uCamPos + rd * hitT;
+        vec3 N = mountainNormal(hp.xz, hitT);
+
+        // Self-shadow raymarch toward sunrise!
+        float shadow = 1.0;
+        float st = 14.0;
+        for (int s = 0; s < 16; s++) {
+          vec3 sp = hp + uSunDir * st;
+          float sh = mountainHeight(sp.xz);
+          if (sp.y < sh) { shadow = 0.08; break; }
+          shadow = min(shadow, smoothstep(-16.0, 12.0, sp.y - sh));
+          st *= 1.34;
+        }
+
+        float elev = hp.y;
+        float slope = 1.0 - N.y;
+        float texN = fbm(hp.xz * 0.014);
+
+        // Material stratification: deep pine foothills -> slate granite ridges -> golden alpenglow snow
+        vec3 pineDark = vec3(0.025, 0.055, 0.048);
+        vec3 granite = mix(vec3(0.09, 0.10, 0.13), vec3(0.21, 0.18, 0.17), texN);
+        vec3 snow = vec3(0.88, 0.91, 0.98);
+
+        float treeLine = 1.0 - smoothstep(55.0, 185.0, elev + texN * 40.0);
+        float snowMask = smoothstep(125.0, 275.0, elev + texN * 55.0) * smoothstep(0.64, 0.22, slope);
+
+        vec3 albedo = mix(granite, pineDark, treeLine * smoothstep(0.55, 0.25, slope));
+        albedo = mix(albedo, snow, snowMask);
+
+        float ndl = max(dot(N, uSunDir), 0.0);
+        vec3 sunCol = vec3(1.85, 1.02, 0.48);
+        vec3 skyAmb = vec3(0.11, 0.17, 0.30);
+        vec3 lit = albedo * (skyAmb * (0.55 + 0.45 * N.y) + sunCol * ndl * shadow * 1.55);
+
+        // Exponential distance aerial perspective + valley floor morning mist (matches foreground fog seamlessly!)
+        float distFog = 1.0 - exp(-max(0.0, hitT - 14.0) * 0.0028);
+        float valleyMist = exp(-max(0.0, hp.y) * 0.032) * smoothstep(90.0, 220.0, hitT) * 0.62;
+        vec3 mistCol = mix(vec3(0.36, 0.42, 0.58), vec3(1.00, 0.68, 0.41), pow(max(dot(rd, uSunDir), 0.0), 3.0));
+        col = mix(lit, mistCol, clamp(distFog * 0.72 + valleyMist, 0.0, 0.92));
+      }
+    }
+
+    // Encode sky openness in alpha (1.0 = sky, 0.0 = occluded mountain) for god-rays!
+    float isSky = (!hitMountain && rd.y > -0.01) ? 1.0 : 0.0;
+    fragColor = vec4(col, isSky);
+  }`;
+
+  // Pass B: Unified 3D World Mesh Shader (Terrain, Lakebed, Mossy Rocks, Bark, Ferns, Glowing Wildflowers)
+  const WORLD_MESH_VS = `#version 300 es
+  layout(location = 0) in vec3 aPos;
+  layout(location = 1) in vec3 aNormal;
+  layout(location = 2) in vec2 aUV;
+  layout(location = 3) in vec4 aMeta; // x=matID, y=moss/hue, z=AO, w=phase
+
+  uniform mat4 uViewProj;
+  uniform float uTime;
+  uniform float uMirrorY;
+
+  out vec3 vWorldPos;
+  out vec3 vNormal;
+  out vec2 vUV;
+  out vec4 vMeta;
+
+  void main() {
+    vec3 p = aPos;
+    vec3 n = aNormal;
+
+    // Gentle breeze sway on ferns (matID 3) & wildflowers (matID 4)
+    if (aMeta.x > 2.5) {
+      float swayFactor = aMeta.x > 3.5 ? 0.035 : clamp(aMeta.y, 0.0, 1.0) * 0.055;
+      float wave = sin(uTime * 1.45 + aMeta.w + p.x * 0.4 + p.z * 0.3);
+      float wave2 = cos(uTime * 0.9 + aMeta.w * 1.7);
+      p.x += wave * swayFactor;
+      p.z += wave2 * swayFactor * 0.6;
+    }
+
+    vWorldPos = p;
+    if (uMirrorY > 0.5) {
+      p.y = -p.y;
+      n.y = -n.y;
+    }
+    vNormal = n;
+    vUV = aUV;
+    vMeta = aMeta;
+    gl_Position = uViewProj * vec4(p, 1.0);
+  }`;
+
+  const WORLD_MESH_FS = `#version 300 es
+  precision highp float;
+  in vec3 vWorldPos;
+  in vec3 vNormal;
+  in vec2 vUV;
+  in vec4 vMeta;
+
+  out vec4 fragColor;
+
+  uniform sampler2D uMatTex;
+  uniform vec3 uCamPos;
+  uniform vec3 uSunDir;
+  uniform float uTime;
+  uniform float uMirrorY;
+
+  float causticPattern(vec2 p, float t) {
+    vec2 i = p * 1.65;
+    float c = 0.0;
+    for (int k = 0; k < 2; k++) {
+      vec2 q = i + vec2(cos(t * 0.7 + i.y * 1.4), sin(t * 0.6 + i.x * 1.4)) * 0.45;
+      c += pow(1.0 - abs(sin(q.x + sin(q.y + t * 0.4)) * cos(q.y + cos(q.x - t * 0.35))), 4.0);
+      i *= 1.55;
+    }
+    return clamp(c * 0.35, 0.0, 1.2);
+  }
+
+  void main() {
+    // Reflection pass clips geometry below water surface
+    if (uMirrorY > 0.5 && vWorldPos.y < -0.02) discard;
+
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uCamPos - vWorldPos);
+    float dist = length(uCamPos - vWorldPos);
+    float matID = vMeta.x;
+
+    vec4 m1 = texture(uMatTex, vUV * 0.85);
+    vec4 m2 = texture(uMatTex, vUV * 3.4 + 0.37);
+
+    vec3 albedo = vec3(0.2);
+    vec3 emissive = vec3(0.0);
+    float specStrength = 0.06;
+
+    if (matID < 0.5) {
+      // 0: Terrain Shore + Submerged Lakebed
+      float y = vWorldPos.y;
+      float slope = 1.0 - N.y;
+      vec3 sandPebble = mix(vec3(0.22, 0.18, 0.13), vec3(0.38, 0.32, 0.24), m1.b * 0.7 + m2.b * 0.3);
+      vec3 wetSoil = vec3(0.09, 0.08, 0.06);
+      vec3 mossGrass = mix(vec3(0.07, 0.16, 0.06), vec3(0.18, 0.28, 0.09), m1.a * 0.6 + m2.r * 0.4);
+      vec3 alpineRock = vec3(0.17, 0.16, 0.15);
+
+      float grassMask = smoothstep(0.05, 0.48, y + m1.r * 0.25) * smoothstep(0.55, 0.15, slope);
+      albedo = mix(sandPebble, wetSoil, smoothstep(-0.25, 0.12, y) * (1.0 - grassMask));
+      albedo = mix(albedo, mossGrass, grassMask);
+      albedo = mix(albedo, alpineRock, smoothstep(0.32, 0.68, slope));
+
+      // Wet shoreline darkening right near y=0
+      float wetBand = smoothstep(0.22, -0.02, y);
+      albedo *= mix(1.0, 0.52, wetBand);
+      specStrength = mix(0.04, 0.35, wetBand);
+
+      // Underwater sunlight caustics on lakebed (visible through crystal-clear water!)
+      if (y < 0.0) {
+        float caust = causticPattern(vWorldPos.xz * 0.85, uTime);
+        float shallowMask = exp(y * 0.65);
+        albedo += vec3(0.26, 0.28, 0.16) * caust * shallowMask;
+      }
+    } else if (matID < 1.5) {
+      // 1: Moss-Covered Granite Boulders
+      float mossRich = vMeta.y;
+      vec3 granite = mix(vec3(0.14, 0.14, 0.15), vec3(0.29, 0.27, 0.24), m1.r * 0.6 + m2.g * 0.4);
+      vec3 mossCol = mix(vec3(0.055, 0.145, 0.045), vec3(0.20, 0.31, 0.08), m1.a * 0.65 + m2.a * 0.35);
+      float mossMask = smoothstep(0.34, 0.72, N.y + (m1.a - 0.5) * 0.55) * clamp(mossRich, 0.0, 1.2) * smoothstep(0.05, 0.32, vWorldPos.y);
+      albedo = mix(granite, mossCol, clamp(mossMask, 0.0, 1.0));
+      float wetBand = smoothstep(0.18, -0.02, vWorldPos.y);
+      albedo *= mix(1.0, 0.48, wetBand);
+      specStrength = mix(0.08, 0.42, wetBand);
+      if (vWorldPos.y < 0.0) {
+        albedo += vec3(0.22, 0.24, 0.14) * causticPattern(vWorldPos.xz * 0.9, uTime) * exp(vWorldPos.y * 0.7);
+      }
+    } else if (matID < 2.5) {
+      // 2: Furrowed Ancient Bark + Creeping Moss
+      vec3 barkDark = vec3(0.08, 0.055, 0.04);
+      vec3 barkWarm = vec3(0.22, 0.16, 0.11);
+      vec3 bark = mix(barkDark, barkWarm, m1.g * 0.7 + m2.g * 0.3);
+      vec3 moss = mix(vec3(0.06, 0.15, 0.05), vec3(0.17, 0.27, 0.08), m2.a);
+      float mossMask = smoothstep(0.45, 0.85, vMeta.y + (m1.a - 0.5) * 0.4);
+      albedo = mix(bark, moss, mossMask);
+      // Perturb normal slightly along bark furrows
+      N = normalize(N + vec3((m1.g - 0.5) * 0.35, 0.0, (m2.g - 0.5) * 0.35));
+    } else if (matID < 3.5) {
+      // 3: Shoreline Ferns & Grass
+      albedo = mix(vec3(0.05, 0.13, 0.04), vec3(0.19, 0.31, 0.08), vMeta.y);
+      // Warm backlit translucency when facing sun
+      float back = pow(max(dot(-V, uSunDir), 0.0), 3.0);
+      emissive += vec3(0.32, 0.38, 0.09) * back * vMeta.y * 0.55;
+    } else {
+      // 4: Glowing Fantasy Wildflowers
+      float h = vMeta.y;
+      vec3 glowA = vec3(1.85, 1.32, 0.48); // Starlight gold
+      vec3 glowB = vec3(0.55, 1.55, 1.75); // Moon-dew cyan
+      vec3 glowC = vec3(1.65, 0.78, 1.32); // Rose-amethyst
+      vec3 petalCol = h < 0.35 ? glowA : (h < 0.7 ? glowB : glowC);
+      float pulse = 0.86 + 0.18 * sin(uTime * 1.9 + vMeta.w);
+      albedo = petalCol * 0.35;
+      emissive = petalCol * (0.85 + 0.75 * vUV.y) * pulse;
+    }
+
+    float ndl = max(dot(N, uSunDir), 0.0);
+    float rim = pow(1.0 - max(dot(N, V), 0.0), 3.5) * max(dot(N, uSunDir) * 0.5 + 0.5, 0.0);
+    vec3 H = normalize(uSunDir + V);
+    float spec = pow(max(dot(N, H), 0.0), 42.0) * specStrength;
+
+    // Gentle tree/bank shadow approximation (foreground banks shaded on sun-away side)
+    float ao = vMeta.z;
+    vec3 sunCol = vec3(1.55, 0.92, 0.44);
+    vec3 skyAmb = mix(vec3(0.08, 0.14, 0.24), vec3(0.24, 0.27, 0.36), N.y * 0.5 + 0.5);
+
+    vec3 col = albedo * (skyAmb * ao * 0.78 + sunCol * ndl * ao * 1.15)
+             + sunCol * (spec + rim * 0.22)
+             + emissive;
+
+    // Height & distance atmospheric sunrise haze
+    vec3 rd = normalize(vWorldPos - uCamPos);
+    float fogT = 1.0 - exp(-max(0.0, dist - 14.0) * 0.0075);
+    float lowMist = exp(-max(0.0, vWorldPos.y) * 0.45) * smoothstep(28.0, 115.0, dist) * 0.52;
+    vec3 fogCol = mix(vec3(0.34, 0.40, 0.54), vec3(0.95, 0.65, 0.38), pow(max(dot(rd, uSunDir), 0.0), 3.0));
+    col = mix(col, fogCol, clamp(fogT * 0.68 + lowMist, 0.0, 0.88));
+
+    fragColor = vec4(col, 0.0); // alpha=0 marks solid occluder for god rays
+  }`;
+
+  // Pass C: Instanced 14,000+ Leaves & Pine Needles Shader
+  const LEAVES_VS = `#version 300 es
+  layout(location = 0) in vec2 aQuad;
+  layout(location = 1) in vec4 aPosSize; // xyz, scale
+  layout(location = 2) in vec4 aRotAO;   // angle, tilt, ao, sunExp
+  layout(location = 3) in vec4 aMeta;    // type, phase, hue, amp
+
+  uniform mat4 uViewProj;
+  uniform vec3 uCamRight;
+  uniform vec3 uCamUp;
+  uniform float uTime;
+  uniform float uMirrorY;
+
+  out vec2 vTexUV;
+  out vec3 vWorldPos;
+  out float vAO;
+  out float vSunExp;
+  out float vType;
+  out float vHue;
+
+  void main() {
+    vec3 center = aPosSize.xyz;
+    float scale = aPosSize.w;
+
+    // Gentle organic leaf flutter
+    float flutter = sin(uTime * 1.85 + aMeta.y + center.x * 0.5) * aMeta.w;
+    float flutterY = cos(uTime * 1.35 + aMeta.y * 1.3 + center.z * 0.4) * aMeta.w * 0.65;
+    center.x += flutter;
+    center.y += flutterY;
+
+    float ang = aRotAO.x + sin(uTime * 1.6 + aMeta.y) * 0.08;
+    float ca = cos(ang), sa = sin(ang);
+    vec2 rotQ = vec2(aQuad.x * ca - aQuad.y * sa, aQuad.x * sa + aQuad.y * ca);
+
+    vec3 worldPos = center + (uCamRight * rotQ.x + uCamUp * rotQ.y) * scale;
+    vWorldPos = worldPos;
+
+    if (uMirrorY > 0.5) {
+      worldPos.y = -worldPos.y;
+    }
+
+    // Atlas split: left [0..0.5] broadleaf, right [0.5..1.0] pine needle spray
+    vec2 baseUV = aQuad * 0.5 + 0.5;
+    vTexUV = vec2(aMeta.x > 0.5 ? (0.5 + baseUV.x * 0.5) : (baseUV.x * 0.5), baseUV.y);
+    vAO = aRotAO.z;
+    vSunExp = aRotAO.w;
+    vType = aMeta.x;
+    vHue = aMeta.z;
+
+    gl_Position = uViewProj * vec4(worldPos, 1.0);
+  }`;
+
+  const LEAVES_FS = `#version 300 es
+  precision highp float;
+  in vec2 vTexUV;
+  in vec3 vWorldPos;
+  in float vAO;
+  in float vSunExp;
+  in float vType;
+  in float vHue;
+
+  out vec4 fragColor;
+
+  uniform sampler2D uLeafTex;
+  uniform vec3 uCamPos;
+  uniform vec3 uSunDir;
+  uniform float uMirrorY;
+
+  void main() {
+    if (uMirrorY > 0.5 && vWorldPos.y < -0.02) discard;
+
+    vec4 tex = texture(uLeafTex, vTexUV);
+    if (tex.a < 0.28) discard;
+
+    vec3 rd = normalize(vWorldPos - uCamPos);
+    float dist = length(vWorldPos - uCamPos);
+
+    // Rich botanical palette: deep forest viridian shadows -> warm golden-olive sunlit canopy rims
+    vec3 broadleafDark = vec3(0.015, 0.044, 0.022);
+    vec3 broadleafMid  = vec3(0.058, 0.145, 0.042) + vec3(0.022, 0.018, -0.008) * vHue;
+    vec3 pineDark      = vec3(0.012, 0.036, 0.028);
+    vec3 pineMid       = vec3(0.038, 0.105, 0.056) + vec3(0.010, 0.014, 0.0) * vHue;
+
+    vec3 darkCol = vType > 0.5 ? pineDark : broadleafDark;
+    vec3 midCol  = vType > 0.5 ? pineMid  : broadleafMid;
+    vec3 albedo = mix(darkCol, midCol, tex.g * vAO);
+
+    // Subsurface Scattering strictly concentrated on sun-facing outer canopy edges!
+    float sunAlign = pow(max(dot(rd, uSunDir), 0.0), 4.0);
+    float rimExp = pow(vSunExp, 1.8);
+    vec3 sssCol = vec3(0.62, 0.48, 0.12) * tex.b * rimExp * (0.12 + 0.85 * sunAlign);
+
+    vec3 skyAmb = vec3(0.11, 0.16, 0.25);
+    vec3 sunCol = vec3(1.18, 0.72, 0.34);
+    vec3 col = albedo * (skyAmb * (0.45 + 0.55 * vAO) + sunCol * rimExp * 0.85) + sssCol;
+
+    // Atmospheric morning haze (gentle so foreground leaves remain rich and crisp)
+    float fogT = 1.0 - exp(-max(0.0, dist - 14.0) * 0.0075);
+    vec3 fogCol = mix(vec3(0.34, 0.40, 0.54), vec3(0.95, 0.65, 0.38), pow(max(dot(rd, uSunDir), 0.0), 3.0));
+    col = mix(col, fogCol, clamp(fogT * 0.68, 0.0, 0.88));
+
+    fragColor = vec4(col, 0.0);
+  }`;
+
+  // Pass D: Physically-Inspired Water Compositing Shader (Fresnel + Clear Lakebed Refraction + Planar Reflection + Micro-Ripples)
+  const WATER_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUV;
+  out vec4 fragColor;
+
+  uniform sampler2D uMainTex;
+  uniform sampler2D uMainDepthTex;
+  uniform sampler2D uReflTex;
+  uniform mat4 uInvViewProj;
+  uniform vec3 uCamPos;
+  uniform vec3 uSunDir;
+  uniform float uTime;
+
+  vec3 reconstructWorldPos(vec2 uv, float depth) {
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 w = uInvViewProj * ndc;
+    return w.xyz / w.w;
+  }
+
+  // Calm Alpine Lake non-repeating multi-directional micro-ripples
+  vec3 waterNormal(vec2 p, float dist, float depth) {
+    float fade = 1.0 / (1.0 + dist * 0.038);
+    float shoreCalm = smoothstep(0.0, 0.55, depth);
+    float amp = 0.0046 * fade * (0.35 + 0.65 * shoreCalm);
+
+    // 6 non-harmonic rotated wave directions + subtle organic distortion (zero regular striping!)
+    vec2 dirs[6] = vec2[](
+      vec2(0.92, 0.39),
+      vec2(-0.68, 0.73),
+      vec2(0.34, -0.94),
+      vec2(0.81, -0.58),
+      vec2(-0.95, -0.31),
+      vec2(0.19, 0.98)
+    );
+    float freqs[6] = float[](1.7, 2.5, 4.1, 6.3, 9.7, 14.5);
+    float speeds[6] = float[](0.75, -0.92, 1.18, -1.35, 1.62, -1.85);
+    float weights[6] = float[](1.0, 0.85, 0.55, 0.38, 0.24, 0.14);
+
+    float dx = 0.0;
+    float dz = 0.0;
+    vec2 warp = vec2(sin(p.y * 0.55 + p.x * 0.31), cos(p.x * 0.48 - p.y * 0.37)) * 0.65;
+    vec2 q = p + warp;
+    for (int i = 0; i < 6; i++) {
+      float ph = dot(q, dirs[i]) * freqs[i] + uTime * speeds[i];
+      float d = cos(ph) * freqs[i] * weights[i];
+      dx += dirs[i].x * d;
+      dz += dirs[i].y * d;
+    }
+
+    return normalize(vec3(-dx * amp, 1.0, -dz * amp));
+  }
+
+  void main() {
+    vec4 mainCol = texture(uMainTex, vUV);
+    float sceneDepth = texture(uMainDepthTex, vUV).r;
+
+    vec4 ndcFar = vec4(vUV * 2.0 - 1.0, 1.0, 1.0);
+    vec4 wFar = uInvViewProj * ndcFar;
+    vec3 rd = normalize(wFar.xyz / wFar.w - uCamPos);
+
+    // Only rays pointing downward can intersect water plane y = 0.0
+    if (rd.y >= -0.0005) {
+      fragColor = mainCol;
+      return;
+    }
+
+    float tWater = -uCamPos.y / rd.y;
+    vec3 waterP = uCamPos + rd * tWater;
+    vec3 sceneP = reconstructWorldPos(vUV, sceneDepth);
+    float tScene = length(sceneP - uCamPos);
+
+    // If terrain/rock/tree is in front of water surface, keep above-water pixel
+    if (sceneDepth < 0.9999 && tScene <= tWater + 0.02) {
+      fragColor = mainCol;
+      return;
+    }
+
+    // Exact physical underwater depth along view ray / vertical height
+    float waterDepth = (sceneDepth >= 0.9999) ? 4.0 : clamp(-sceneP.y, 0.0, 6.0);
+    vec3 N = waterNormal(waterP.xz, tWater, waterDepth);
+    vec3 V = -rd;
+
+    // 1. Refracted Crystal-Clear Lakebed
+    vec2 refrOffset = N.xz * (0.042 * smoothstep(0.0, 0.8, waterDepth));
+    vec2 refrUV = clamp(vUV + refrOffset, vec2(0.002), vec2(0.998));
+    vec3 bedCol = texture(uMainTex, refrUV).rgb;
+
+    // Beer-Lambert clarity tint (shallow crystal clear -> deep emerald-sapphire alpine lake)
+    vec3 absorption = exp(-vec3(0.45, 0.18, 0.14) * waterDepth * 1.08);
+    vec3 deepScatter = vec3(0.018, 0.068, 0.085);
+    vec3 refrCol = mix(deepScatter, bedCol * absorption, clamp(0.35 + 0.65 * exp(-waterDepth * 0.44), 0.0, 1.0));
+
+    // 2. Mirror-Calm Planar Reflection (delicate organic micro-ripple perturbation)
+    vec2 reflUV = clamp(vUV + vec2(N.x * 0.036, N.z * 0.024), vec2(0.002), vec2(0.998));
+    vec3 reflCol = texture(uReflTex, reflUV).rgb;
+
+    // 3. Schlick Fresnel (grazing angle -> mirror; steep near shore -> crystal clear!)
+    float cosTheta = clamp(dot(N, V), 0.0, 1.0);
+    float fresnel = 0.04 + 0.96 * pow(1.0 - cosTheta, 4.2);
+    vec3 waterCol = mix(refrCol, reflCol, fresnel);
+
+    // 4. Shimmering Sun Path Specular Glints on Micro-Ripples
+    vec3 R = reflect(-uSunDir, N);
+    float specTight = pow(max(dot(R, V), 0.0), 520.0);
+    float specSoft = pow(max(dot(R, V), 0.0), 64.0);
+    waterCol += vec3(3.6, 2.2, 0.95) * specTight * 1.1 + vec3(0.95, 0.56, 0.24) * specSoft * 0.14;
+
+    // 5. Delicate shoreline meniscus & gentle morning mist wisps near far shore
+    float shoreEdge = smoothstep(0.08, 0.005, waterDepth);
+    waterCol = mix(waterCol, bedCol * 0.92 + vec3(0.16, 0.15, 0.13) * 0.30, shoreEdge * 0.62);
+
+    float mistBand = smoothstep(32.0, 145.0, tWater) * (0.24 + 0.10 * sin(waterP.x * 0.12 + uTime * 0.25));
+    vec3 mistCol = mix(vec3(0.36, 0.42, 0.56), vec3(0.96, 0.66, 0.40), pow(max(dot(rd, uSunDir), 0.0), 3.0));
+    waterCol = mix(waterCol, mistCol, clamp(mistBand, 0.0, 0.48));
+
+    fragColor = vec4(waterCol, 0.0);
+  }`;
+
+  // Pass E: Volumetric God Rays (Focused Golden Shafts through Canopy & Mountain Gaps)
+  const GODRAYS_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUV;
+  out vec4 fragColor;
+
+  uniform sampler2D uSceneTex;
+  uniform vec2 uSunScreenUV;
+  uniform float uTime;
+
+  void main() {
+    vec2 delta = (vUV - uSunScreenUV);
+    float distToSun = length(delta);
+    const int SAMPLES = 56;
+    vec2 stepUV = delta * (0.90 / float(SAMPLES));
+    vec2 uv = vUV;
+    float illuminationDecay = 1.0;
+    vec3 accum = vec3(0.0);
+
+    for (int i = 0; i < SAMPLES; i++) {
+      uv -= stepUV;
+      if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break;
+      vec4 s = texture(uSceneTex, uv);
+      // Only bright solar-aureole sky leaks create distinct golden god-ray shafts!
+      float skyMask = s.a;
+      float sunProx = smoothstep(0.42, 0.0, length(uv - uSunScreenUV));
+      vec3 raySample = s.rgb * skyMask * sunProx;
+      accum += raySample * illuminationDecay;
+      illuminationDecay *= 0.935;
+    }
+
+    accum /= float(SAMPLES);
+    float shimmer = 0.93 + 0.07 * sin(uTime * 0.65 + vUV.x * 9.0 + vUV.y * 5.0);
+    float radialFade = smoothstep(1.15, 0.04, distToSun);
+    vec3 rayTint = vec3(1.28, 0.84, 0.40);
+    fragColor = vec4(accum * rayTint * radialFade * shimmer * 0.34, 1.0);
+  }`;
+
+  // Pass F: Sunlit Pollen, Glowing Forest Spores & Lake Mist Particle System
+  const PARTICLE_VS = `#version 300 es
+  layout(location = 0) in vec4 aPosSize; // xyz, size
+  layout(location = 1) in vec4 aMeta;    // kind, phase, speed, rand
+
+  uniform mat4 uViewProj;
+  uniform float uTime;
+
+  out float vKind;
+  out float vAlpha;
+  out float vRand;
+
+  void main() {
+    vec3 p = aPosSize.xyz;
+    float ph = aMeta.y;
+    float spd = aMeta.z;
+    float t = uTime * spd;
+
+    if (aMeta.x < 1.5) {
+      // Curl-like gentle float for pollen & glowing spores
+      p.x += sin(t * 0.55 + ph) * 0.65 + cos(t * 0.25 + p.z * 0.2) * 0.35;
+      p.y += sin(t * 0.42 + ph * 1.7) * 0.38;
+      p.z += cos(t * 0.48 + ph * 0.9) * 0.55;
+    } else {
+      // Slow drifting morning mist wisp over the lake
+      p.x += mod(t * 0.45 + ph * 8.0, 48.0) - 24.0;
+      p.y += sin(t * 0.3 + ph) * 0.18;
+    }
+
+    gl_Position = uViewProj * vec4(p, 1.0);
+    float dist = max(1.0, gl_Position.w);
+    gl_PointSize = clamp(aPosSize.w * 1150.0 / dist, 1.5, aMeta.x > 1.5 ? 210.0 : 28.0);
+    vKind = aMeta.x;
+    vAlpha = 0.55 + 0.45 * sin(uTime * 1.4 + ph * 2.3);
+    vRand = aMeta.w;
+  }`;
+
+  const PARTICLE_FS = `#version 300 es
+  precision highp float;
+  in float vKind;
+  in float vAlpha;
+  in float vRand;
+  out vec4 fragColor;
+
+  uniform sampler2D uMainDepthTex;
+
+  void main() {
+    float sceneD = texelFetch(uMainDepthTex, ivec2(gl_FragCoord.xy), 0).r;
+    if (gl_FragCoord.z > sceneD) discard;
+
+    vec2 d = gl_PointCoord * 2.0 - 1.0;
+    float r2 = dot(d, d);
+    if (r2 > 1.0) discard;
+
+    if (vKind < 0.5) {
+      // Sunlit golden dust motes
+      float core = exp(-r2 * 5.5);
+      fragColor = vec4(vec3(1.65, 1.18, 0.58) * core * vAlpha * 0.65, 1.0);
+    } else if (vKind < 1.5) {
+      // Enchanted glowing forest spores near wildflowers
+      float core = exp(-r2 * 4.5);
+      vec3 c = vRand > 0.5 ? vec3(0.65, 1.65, 1.85) : vec3(1.85, 1.35, 0.55);
+      fragColor = vec4(c * core * vAlpha * 0.85, 1.0);
+    } else {
+      // Soft morning lake mist puff
+      float soft = pow(1.0 - r2, 2.2);
+      fragColor = vec4(vec3(0.85, 0.72, 0.58) * soft * 0.042 * vAlpha, 1.0);
+    }
+  }`;
+
+  // Pass G: Bloom Extract + Separable Blur + ACES Filmic Romanticism Composite
+  const BLOOM_EXTRACT_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUV;
+  out vec4 fragColor;
+  uniform sampler2D uTex;
+  void main() {
+    vec3 c = texture(uTex, vUV).rgb;
+    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float w = smoothstep(1.15, 2.6, lum);
+    fragColor = vec4(c * w, 1.0);
+  }`;
+
+  const BLUR_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUV;
+  out vec4 fragColor;
+  uniform sampler2D uTex;
+  uniform vec2 uDir;
+  void main() {
+    float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    vec3 res = texture(uTex, vUV).rgb * weights[0];
+    for (int i = 1; i < 5; i++) {
+      vec2 off = uDir * float(i) * 1.45;
+      res += texture(uTex, vUV + off).rgb * weights[i];
+      res += texture(uTex, vUV - off).rgb * weights[i];
+    }
+    fragColor = vec4(res, 1.0);
+  }`;
+
+  const FINAL_COMPOSITE_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUV;
+  out vec4 fragColor;
+
+  uniform sampler2D uSceneTex;
+  uniform sampler2D uGodRaysTex;
+  uniform sampler2D uBloomTex;
+
+  vec3 acesFilmic(vec3 x) {
+    float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+  }
+
+  float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+
+  void main() {
+    vec3 col = texture(uSceneTex, vUV).rgb;
+    vec3 rays = texture(uGodRaysTex, vUV).rgb;
+    vec3 bloom = texture(uBloomTex, vUV).rgb;
+
+    col += rays * 0.92 + bloom * 0.42;
+
+    // 19th-century Romanticism color grading & Filmic exposure
+    col *= 1.06;
+    col = acesFilmic(col);
+
+    // Subtle warm-highlight / cool-shadow split tone
+    float lum = dot(col, vec3(0.299, 0.587, 0.114));
+    vec3 shadowTint = vec3(0.94, 0.98, 1.05);
+    vec3 highTint   = vec3(1.04, 1.00, 0.93);
+    col *= mix(shadowTint, highTint, smoothstep(0.15, 0.85, lum));
+
+    // Gentle framing vignette
+    vec2 q = vUV * 2.0 - 1.0;
+    float vig = 1.0 - dot(q * vec2(0.85, 1.0), q * vec2(0.85, 1.0)) * 0.24;
+    col *= clamp(vig, 0.62, 1.0);
+
+    // Gamma encode sRGB + 1-LSB dither to eliminate sky banding
+    col = pow(clamp(col, 0.0, 1.0), vec3(1.0 / 2.2));
+    col += (hash12(gl_FragCoord.xy) - 0.5) * (1.0 / 255.0);
+
+    fragColor = vec4(col, 1.0);
+  }`;
+
+  // =========================================================================
+  // 7. Compile Programs & Allocate Render Targets
+  // =========================================================================
+  let progBackdrop, progWorld, progLeaves, progWater, progGodRays, progParticles, progExtract, progBlur, progFinal;
+  try {
+    progBackdrop = createProgram(FULLSCREEN_VS, BACKDROP_FS);
+    progWorld = createProgram(WORLD_MESH_VS, WORLD_MESH_FS);
+    progLeaves = createProgram(LEAVES_VS, LEAVES_FS);
+    progWater = createProgram(FULLSCREEN_VS, WATER_FS);
+    progGodRays = createProgram(FULLSCREEN_VS, GODRAYS_FS);
+    progParticles = createProgram(PARTICLE_VS, PARTICLE_FS);
+    progExtract = createProgram(FULLSCREEN_VS, BLOOM_EXTRACT_FS);
+    progBlur = createProgram(FULLSCREEN_VS, BLUR_FS);
+    progFinal = createProgram(FULLSCREEN_VS, FINAL_COMPOSITE_FS);
+  } catch (e) {
+    showError(e.message);
+    return;
+  }
+
+  let fboBackdrop, fboBackdropRefl, fboMain, fboRefl, fboWater, fboGodRays, fboBloomA, fboBloomB;
+  try {
+    fboBackdrop     = createFBO(WIDTH, HEIGHT, { hdr: true });
+    fboBackdropRefl = createFBO(1280, 720, { hdr: true });
+    fboMain         = createFBO(WIDTH, HEIGHT, { hdr: true, withDepth: true });
+    fboRefl         = createFBO(1280, 720, { hdr: true, withDepth: true });
+    fboWater        = createFBO(WIDTH, HEIGHT, { hdr: true });
+    fboGodRays      = createFBO(960, 540, { hdr: true });
+    fboBloomA       = createFBO(480, 270, { hdr: true });
+    fboBloomB       = createFBO(480, 270, { hdr: true });
+  } catch (e) {
+    showError(e.message);
+    return;
+  }
+
+  // Camera & Lighting setup (Romanticism low-sunrise composition)
+  const camPos = [0.0, 2.55, 0.0];
+  const camTarget = [0.0, 3.05, 50.0];
+  const viewMat = mat4LookAt(camPos, camTarget, [0, 1, 0]);
+  const projMat = mat4Perspective(46 * Math.PI / 180, WIDTH / HEIGHT, 0.4, 5000.0);
+  const viewProjMat = mat4Mul(projMat, viewMat);
+  const invViewProjMat = mat4Invert(viewProjMat);
+
+  // Camera basis vectors for instanced leaf billboards
+  const camForward = norm3(sub3(camTarget, camPos));
+  const camRight = norm3(cross3(camForward, [0, 1, 0]));
+  const camUp = norm3(cross3(camRight, camForward));
+
+  // Sun direction: shining through central-left alpine pass at sunrise
+  const sunDir = norm3([-0.18, 0.145, 0.972]);
+
+  // Project sun direction onto screen UV for radial god-rays
+  function computeSunScreenUV() {
+    const p = [camPos[0] + sunDir[0] * 1000, camPos[1] + sunDir[1] * 1000, camPos[2] + sunDir[2] * 1000];
+    const m = viewProjMat;
+    const cx = m[0]*p[0] + m[4]*p[1] + m[8]*p[2] + m[12];
+    const cy = m[1]*p[0] + m[5]*p[1] + m[9]*p[2] + m[13];
+    const cw = m[3]*p[0] + m[7]*p[1] + m[11]*p[2] + m[15];
+    return [(cx / cw) * 0.5 + 0.5, (cy / cw) * 0.5 + 0.5];
+  }
+  const sunScreenUV = computeSunScreenUV();
+
+  // =========================================================================
+  // 8. Seed State & GPU Buffer Upload
+  // =========================================================================
+  let sceneGPU = null;
+
+  function disposeSceneGPU() {
+    if (!sceneGPU) return;
+    gl.deleteTexture(sceneGPU.textures.leafTex);
+    gl.deleteTexture(sceneGPU.textures.matTex);
+    gl.deleteVertexArray(sceneGPU.terrainVAO);
+    gl.deleteVertexArray(sceneGPU.propsVAO);
+    gl.deleteVertexArray(sceneGPU.leavesVAO);
+    gl.deleteVertexArray(sceneGPU.particleVAO);
+    for (const b of sceneGPU.buffers) gl.deleteBuffer(b);
+    sceneGPU = null;
+  }
+
+  function buildMeshVAO(pos, nor, uv, meta, indices, buffers) {
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+
+    const makeVBO = (arr, loc, size) => {
+      const b = gl.createBuffer();
+      buffers.push(b);
+      gl.bindBuffer(gl.ARRAY_BUFFER, b);
+      gl.bufferData(gl.ARRAY_BUFFER, arr instanceof Float32Array ? arr : new Float32Array(arr), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+    };
+
+    makeVBO(pos, 0, 3);
+    makeVBO(nor, 1, 3);
+    makeVBO(uv, 2, 2);
+    makeVBO(meta, 3, 4);
+
+    const ibo = gl.createBuffer();
+    buffers.push(ibo);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    const idxArr = indices instanceof Uint32Array ? indices : new Uint32Array(indices);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idxArr, gl.STATIC_DRAW);
+
+    gl.bindVertexArray(null);
+    return { vao, indexCount: idxArr.length };
+  }
+
+  function renderBackdropFBO(fbo, mirrorY, seedOffset) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo.fbo);
+    gl.viewport(0, 0, fbo.w, fbo.h);
+    gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(progBackdrop);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progBackdrop, 'uInvViewProj'), false, invViewProjMat);
+    gl.uniform3fv(gl.getUniformLocation(progBackdrop, 'uCamPos'), camPos);
+    gl.uniform3fv(gl.getUniformLocation(progBackdrop, 'uSunDir'), sunDir);
+    gl.uniform1f(gl.getUniformLocation(progBackdrop, 'uMirrorY'), mirrorY);
+    gl.uniform1f(gl.getUniformLocation(progBackdrop, 'uSeedOffset'), seedOffset);
+    gl.bindVertexArray(quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  function rebuildWorld(seedInputStr) {
+    const t0 = performance.now();
+    const numericSeed = /^\d+$/.test(seedInputStr.trim())
+      ? parseInt(seedInputStr.trim(), 10)
+      : hashString(seedInputStr.trim() || '1874');
+
+    disposeSceneGPU();
+    const buffers = [];
+    const textures = buildProceduralTextures(numericSeed);
+    const terrain = createTerrainModel(numericSeed);
+    const forest = buildFractalForest(terrain, numericSeed);
+    const particles = createParticles(numericSeed);
+
+    const terrainVAOInfo = buildMeshVAO(terrain.pos, terrain.nor, terrain.uv, terrain.meta, terrain.indices, buffers);
+    const propsVAOInfo = buildMeshVAO(forest.mesh.pos, forest.mesh.nor, forest.mesh.uv, forest.mesh.meta, forest.mesh.idx, buffers);
+
+    // Instanced leaves VAO
+    const leavesVAO = gl.createVertexArray();
+    gl.bindVertexArray(leavesVAO);
+    const lqBuf = gl.createBuffer();
+    buffers.push(lqBuf);
+    gl.bindBuffer(gl.ARRAY_BUFFER, lqBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    const leafInstBuf = gl.createBuffer();
+    buffers.push(leafInstBuf);
+    gl.bindBuffer(gl.ARRAY_BUFFER, leafInstBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, forest.leafData, gl.STATIC_DRAW);
+    const stride = 12 * 4;
+    for (let attr = 0; attr < 3; attr++) {
+      gl.enableVertexAttribArray(1 + attr);
+      gl.vertexAttribPointer(1 + attr, 4, gl.FLOAT, false, stride, attr * 16);
+      gl.vertexAttribDivisor(1 + attr, 1);
+    }
+    gl.bindVertexArray(null);
+
+    // Particles VAO
+    const particleVAO = gl.createVertexArray();
+    gl.bindVertexArray(particleVAO);
+    const pBuf = gl.createBuffer();
+    buffers.push(pBuf);
+    gl.bindBuffer(gl.ARRAY_BUFFER, pBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, particles.data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 32, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 32, 16);
+    gl.bindVertexArray(null);
+
+    const seedOffset = (numericSeed % 997) * 0.37;
+    renderBackdropFBO(fboBackdrop, 0.0, seedOffset);
+    renderBackdropFBO(fboBackdropRefl, 1.0, seedOffset);
+
+    sceneGPU = {
+      textures,
+      terrainVAO: terrainVAOInfo.vao,
+      terrainIdxCount: terrainVAOInfo.indexCount,
+      propsVAO: propsVAOInfo.vao,
+      propsIdxCount: propsVAOInfo.indexCount,
+      leavesVAO,
+      leafCount: forest.leafCount,
+      particleVAO,
+      particleCount: particles.count,
+      buffers
+    };
+
+    const elapsed = Math.round(performance.now() - t0);
+    statusEl.textContent = `${forest.leafCount.toLocaleString()} 叶 · ${elapsed}ms`;
+  }
+
+  // =========================================================================
+  // 9. Real-Time Micro-Motion Render Loop
+  // =========================================================================
+  // Dedicated 1-to-1 HDR texture blit shader
+  const BLIT_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUV;
+  out vec4 fragColor;
+  uniform sampler2D uTex;
+  void main() { fragColor = texture(uTex, vUV); }`;
+  const progBlit = createProgram(FULLSCREEN_VS, BLIT_FS);
+
+  function drawScenePass(targetFBO, backdropTex, mirrorY, timeSec) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, targetFBO.fbo);
+    gl.viewport(0, 0, targetFBO.w, targetFBO.h);
+    gl.clearDepth(1.0);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+
+    // 1. Copy precomputed HDR sky + raymarched self-shadowed mountain backdrop
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    gl.useProgram(progBlit);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, backdropTex);
+    gl.uniform1i(gl.getUniformLocation(progBlit, 'uTex'), 0);
+    gl.bindVertexArray(quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // 2. Render 3D World Meshes (Terrain, Lakebed, Mossy Boulders, Ancient Trunks, Ferns, Glowing Wildflowers)
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.useProgram(progWorld);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progWorld, 'uViewProj'), false, viewProjMat);
+    gl.uniform3fv(gl.getUniformLocation(progWorld, 'uCamPos'), camPos);
+    gl.uniform3fv(gl.getUniformLocation(progWorld, 'uSunDir'), sunDir);
+    gl.uniform1f(gl.getUniformLocation(progWorld, 'uTime'), timeSec);
+    gl.uniform1f(gl.getUniformLocation(progWorld, 'uMirrorY'), mirrorY);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneGPU.textures.matTex);
+    gl.uniform1i(gl.getUniformLocation(progWorld, 'uMatTex'), 0);
+
+    // Terrain
+    gl.bindVertexArray(sceneGPU.terrainVAO);
+    gl.drawElements(gl.TRIANGLES, sceneGPU.terrainIdxCount, gl.UNSIGNED_INT, 0);
+
+    // Rocks, Trees, Ferns, Wildflowers
+    gl.bindVertexArray(sceneGPU.propsVAO);
+    gl.drawElements(gl.TRIANGLES, sceneGPU.propsIdxCount, gl.UNSIGNED_INT, 0);
+
+    // 3. Render 14,000+ Individually Shaded Leaves & Pine Needles (Instanced)
+    gl.useProgram(progLeaves);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progLeaves, 'uViewProj'), false, viewProjMat);
+    gl.uniform3fv(gl.getUniformLocation(progLeaves, 'uCamRight'), camRight);
+    gl.uniform3fv(gl.getUniformLocation(progLeaves, 'uCamUp'), camUp);
+    gl.uniform3fv(gl.getUniformLocation(progLeaves, 'uCamPos'), camPos);
+    gl.uniform3fv(gl.getUniformLocation(progLeaves, 'uSunDir'), sunDir);
+    gl.uniform1f(gl.getUniformLocation(progLeaves, 'uTime'), timeSec);
+    gl.uniform1f(gl.getUniformLocation(progLeaves, 'uMirrorY'), mirrorY);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneGPU.textures.leafTex);
+    gl.uniform1i(gl.getUniformLocation(progLeaves, 'uLeafTex'), 0);
+    gl.bindVertexArray(sceneGPU.leavesVAO);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, sceneGPU.leafCount);
+    gl.bindVertexArray(null);
+  }
+
+  function renderFrame(timeSec) {
+    if (!sceneGPU) return;
+
+    // Pass 1A: Mirrored Planar Reflection Scene
+    drawScenePass(fboRefl, fboBackdropRefl.colorTex, 1.0, timeSec);
+
+    // Pass 1B: Main Scene + Crystal-Clear Submerged Lakebed
+    drawScenePass(fboMain, fboBackdrop.colorTex, 0.0, timeSec);
+
+    // Pass 2: Water Surface Compositing (Fresnel + Refracted Bed + Rippled Reflection + Sun Path)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboWater.fbo);
+    gl.viewport(0, 0, fboWater.w, fboWater.h);
+    gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(progWater);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fboMain.colorTex);
+    gl.uniform1i(gl.getUniformLocation(progWater, 'uMainTex'), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, fboMain.depthTex);
+    gl.uniform1i(gl.getUniformLocation(progWater, 'uMainDepthTex'), 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, fboRefl.colorTex);
+    gl.uniform1i(gl.getUniformLocation(progWater, 'uReflTex'), 2);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progWater, 'uInvViewProj'), false, invViewProjMat);
+    gl.uniform3fv(gl.getUniformLocation(progWater, 'uCamPos'), camPos);
+    gl.uniform3fv(gl.getUniformLocation(progWater, 'uSunDir'), sunDir);
+    gl.uniform1f(gl.getUniformLocation(progWater, 'uTime'), timeSec);
+    gl.bindVertexArray(quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Pass 3: Additive Atmospheric Particles (Pollen, Glowing Spores, Lake Mist) directly into fboWater
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.useProgram(progParticles);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fboMain.depthTex);
+    gl.uniform1i(gl.getUniformLocation(progParticles, 'uMainDepthTex'), 0);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progParticles, 'uViewProj'), false, viewProjMat);
+    gl.uniform1f(gl.getUniformLocation(progParticles, 'uTime'), timeSec);
+    gl.bindVertexArray(sceneGPU.particleVAO);
+    gl.drawArrays(gl.POINTS, 0, sceneGPU.particleCount);
+    gl.disable(gl.BLEND);
+
+    // Pass 4: Volumetric God Rays (Radial Raymarch from Sun through Canopy Gaps)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboGodRays.fbo);
+    gl.viewport(0, 0, fboGodRays.w, fboGodRays.h);
+    gl.useProgram(progGodRays);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fboMain.colorTex);
+    gl.uniform1i(gl.getUniformLocation(progGodRays, 'uSceneTex'), 0);
+    gl.uniform2fv(gl.getUniformLocation(progGodRays, 'uSunScreenUV'), sunScreenUV);
+    gl.uniform1f(gl.getUniformLocation(progGodRays, 'uTime'), timeSec);
+    gl.bindVertexArray(quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Pass 5: HDR Bloom Extract & Separable Blur
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboBloomA.fbo);
+    gl.viewport(0, 0, fboBloomA.w, fboBloomA.h);
+    gl.useProgram(progExtract);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fboWater.colorTex);
+    gl.uniform1i(gl.getUniformLocation(progExtract, 'uTex'), 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    gl.useProgram(progBlur);
+    for (let pass = 0; pass < 2; pass++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fboBloomB.fbo);
+      gl.bindTexture(gl.TEXTURE_2D, fboBloomA.colorTex);
+      gl.uniform1i(gl.getUniformLocation(progBlur, 'uTex'), 0);
+      gl.uniform2f(gl.getUniformLocation(progBlur, 'uDir'), 1.0 / fboBloomA.w, 0.0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fboBloomA.fbo);
+      gl.bindTexture(gl.TEXTURE_2D, fboBloomB.colorTex);
+      gl.uniform2f(gl.getUniformLocation(progBlur, 'uDir'), 0.0, 1.0 / fboBloomA.h);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    // Pass 6: Final 1920x1080 Filmic Tone Mapping & Romanticism Grading to Canvas
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, WIDTH, HEIGHT);
+    gl.useProgram(progFinal);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fboWater.colorTex);
+    gl.uniform1i(gl.getUniformLocation(progFinal, 'uSceneTex'), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, fboGodRays.colorTex);
+    gl.uniform1i(gl.getUniformLocation(progFinal, 'uGodRaysTex'), 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, fboBloomA.colorTex);
+    gl.uniform1i(gl.getUniformLocation(progFinal, 'uBloomTex'), 2);
+    gl.bindVertexArray(quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+  }
+
+  // =========================================================================
+  // 10. Animation Loop & Controls
+  // =========================================================================
+  let paused = false;
+  let simTime = 0.0;
+  let lastNow = performance.now();
+
+  function tick(now) {
+    const dt = Math.min(0.05, (now - lastNow) * 0.001);
+    lastNow = now;
+    if (!paused) {
+      simTime += dt;
+      renderFrame(simTime);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  document.getElementById('applySeedBtn').addEventListener('click', () => {
+    rebuildWorld(seedInput.value);
+    renderFrame(simTime);
+  });
+
+  document.getElementById('randSeedBtn').addEventListener('click', () => {
+    const s = Math.floor(1000 + Math.random() * 89999);
+    seedInput.value = String(s);
+    rebuildWorld(seedInput.value);
+    renderFrame(simTime);
+  });
+
+  seedInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      rebuildWorld(seedInput.value);
+      renderFrame(simTime);
+    }
+  });
+
+  const pauseBtn = document.getElementById('pauseBtn');
+  pauseBtn.addEventListener('click', () => {
+    paused = !paused;
+    pauseBtn.textContent = paused ? '继续微动' : '暂停微动';
+  });
+
+  document.getElementById('saveBtn').addEventListener('click', () => {
+    renderFrame(simTime);
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `alpine_sunrise_${seedInput.value || '1874'}_1920x1080.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }, 'image/png');
+  });
+
+  document.getElementById('hudToggle').addEventListener('click', () => {
+    hud.classList.toggle('hidden');
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'h' || e.key === 'H') {
+      if (document.activeElement !== seedInput) hud.classList.toggle('hidden');
+    }
+  });
+
+  // Initialize hero scene
+  rebuildWorld(seedInput.value);
+  renderFrame(0.0);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
